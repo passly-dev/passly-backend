@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-
 	"os"
-
 	"github.com/labstack/echo/v4"
 	_ "github.com/lib/pq"
 )
