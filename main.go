@@ -6,14 +6,19 @@ import (
 	"log"
 	"net/http"
 
+	"os"
+
 	"github.com/labstack/echo/v4"
 	_ "github.com/lib/pq"
 )
 
 func main() {
 	// データベースの接続情報（docker-compose.ymlの設定と一致させます）
-	connStr := "host=localhost port=5432 user=user password=password dbname=streetpass sslmode=disable"
-	db, err := sql.Open("postgres", connStr)
+	dbUrl := os.Getenv("DATABASE_URL")
+	if dbUrl == ""{
+		dbUrl = "host=127.0.0.1 port=5432 user=user password=password dbname=streetpass sslmode=disable"
+	}
+	db, err := sql.Open("postgres", dbUrl)
 	if err != nil {
 		log.Fatal("DB起動エラー:", err)
 	}
@@ -47,5 +52,9 @@ func main() {
 		return c.String(http.StatusOK, "API Server and DB are running!")
 	})
 
-	e.Logger.Fatal(e.Start(":8080"))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	e.Logger.Fatal(e.Start(":" + port))
 }
