@@ -104,6 +104,11 @@ func main() {
 		return c.JSON(http.StatusOK, u)
 	})
 
+	// サーバーの死活監視用ルート
+	e.GET("/", func(c echo.Context) error {
+    	return c.String(http.StatusOK, "StreetPass API Server is running!")
+	})
+	
 	// 【イベント作成】新しいイベントを登録します
 	e.POST("/events", func(c echo.Context) error {
 		ev := new(Event)
