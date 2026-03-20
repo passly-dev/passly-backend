@@ -19,7 +19,7 @@ type User struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	Email        string `json:"email"`
-	Password     string `json:"password,omitempty"` // セキュリティのため返却時は隠す
+	Password     string `json:"password,omitempty"`
 	IconURL      string `json:"icon_url"`
 	OneWord      string `json:"one_word"`
 	Role         string `json:"role"`
@@ -64,23 +64,18 @@ func main() {
 	defer db.Close()
 
 	// 2. テーブルの初期化
-	// 起動時にテーブルがなければ自動で作成します。
 	initDB(db)
 
 	// 3. Echoインスタンスの作成とミドルウェア設定
 	e := echo.New()
-	e.Use(middleware.Logger())  // アクセスログをターミナルに表示
-	e.Use(middleware.Recover()) // パニック時にサーバーを落とさない
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
 
-	// --- ルーティング (APIエンドポイント) ---
-
-	// 【ユーザー登録】パスワードを安全にハッシュ化して保存します
 	e.POST("/signup", func(c echo.Context) error {
 		u := new(User)
 		if err := c.Bind(u); err != nil {
 			return err
 		}
-		// パスワードをそのまま保存せず、ハッシュ化して保護
 		hashed, _ := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
 		
 		query := `INSERT INTO users (id, name, email, password_hash, icon_url, one_word, role, tech_stack, twitter_url, github_url, portfolio_url, affiliation) 
@@ -92,7 +87,6 @@ func main() {
 		return c.JSON(http.StatusCreated, map[string]string{"message": "User registered successfully"})
 	})
 
-	// 【ユーザー詳細取得】特定のユーザーのプロフィールを返します
 	e.GET("/users/:id", func(c echo.Context) error {
 		id := c.Param("id")
 		var u User
@@ -104,16 +98,14 @@ func main() {
 		return c.JSON(http.StatusOK, u)
 	})
 
-	// GETリクエスト（ブラウザなど）用
 		e.GET("/", func(c echo.Context) error {
 			return c.String(http.StatusOK, "StreetPass API Server is running!")
 		})
 
-		// HEADリクエスト（Renderの監視システム）用
 		e.HEAD("/", func(c echo.Context) error {
-			return c.NoContent(http.StatusOK) // 中身は空でOKを返す
+			return c.NoContent(http.StatusOK)
 		})
-	// 【イベント作成】新しいイベントを登録します
+
 	e.POST("/events", func(c echo.Context) error {
 		ev := new(Event)
 		if err := c.Bind(ev); err != nil {
@@ -127,7 +119,6 @@ func main() {
 		return c.JSON(http.StatusCreated, ev)
 	})
 
-	// 【イベント一覧取得】開催中のイベントをすべて返します
 	e.GET("/events", func(c echo.Context) error {
 		rows, err := db.Query("SELECT id, name, location, start_at, end_at FROM events")
 		if err != nil {

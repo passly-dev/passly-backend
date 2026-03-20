@@ -1,12 +1,13 @@
+// ユーザー情報
 Table users {
-  id varchar [primary key, note: 'ユーザー提供のID']
+  id varchar [primary key]
   name varchar [not null]
   email varchar [unique, not null]
-  password_hash text [not null, note: 'ハッシュ化されたパスワード']
+  password_hash text [not null]
   icon_url text
   one_word text
-  role varchar [note: 'フロント / バック / フルスタック / その他']
-  tech_stack text [note: '複数の技術要素（カンマ区切り等）']
+  role varchar
+  tech_stack text
   twitter_url text
   github_url text
   portfolio_url text
@@ -15,11 +16,30 @@ Table users {
   updated_at timestamp [default: `now()`]
 }
 
+// イベント情報
+Table events {
+  id serial [primary key]
+  name varchar [not null]
+  location varchar
+  start_at timestamp
+  end_at timestamp
+  created_at timestamp [default: `now()`]
+}
+
+// イベント参加者 (中間テーブル)
+Table event_participants {
+  id serial [primary key]
+  event_id integer [ref: > events.id]
+  user_id varchar [ref: > users.id]
+  joined_at timestamp [default: `now()`]
+}
+
+// すれ違い記録
 Table encounters {
   id serial [primary key]
   my_id varchar [ref: > users.id]
   target_id varchar [ref: > users.id]
-  event_id integer [note: '任意']
-  is_confirmed boolean [default: false, note: '未確認 / 確認済み']
+  event_id integer [ref: > events.id, note: '任意']
+  is_confirmed boolean [default: false]
   created_at timestamp [default: `now()`]
 }
