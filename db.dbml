@@ -1,0 +1,25 @@
+Table users {
+  id varchar [primary key, note: 'ユーザー提供のID']
+  name varchar [not null]
+  email varchar [unique, not null]
+  password_hash text [not null, note: 'ハッシュ化されたパスワード']
+  icon_url text
+  one_word text
+  role varchar [note: 'フロント / バック / フルスタック / その他']
+  tech_stack text [note: '複数の技術要素（カンマ区切り等）']
+  twitter_url text
+  github_url text
+  portfolio_url text
+  affiliation text
+  created_at timestamp [default: `now()`]
+  updated_at timestamp [default: `now()`]
+}
+
+Table encounters {
+  id serial [primary key]
+  my_id varchar [ref: > users.id]
+  target_id varchar [ref: > users.id]
+  event_id integer [note: '任意']
+  is_confirmed boolean [default: false, note: '未確認 / 確認済み']
+  created_at timestamp [default: `now()`]
+}
