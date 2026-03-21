@@ -197,9 +197,9 @@ e.POST("/signup", func(c echo.Context) error {
 // --- データベース初期化関数 ---
 
 func initDB(db *sql.DB) {
-	db.Exec("DROP TABLE IF EXISTS event_participants CASCADE;")
-	db.Exec("DROP TABLE IF EXISTS encounters CASCADE;")
-	db.Exec("DROP TABLE IF EXISTS users CASCADE;")
+	//db.Exec("DROP TABLE IF EXISTS event_participants CASCADE;")
+	//db.Exec("DROP TABLE IF EXISTS encounters CASCADE;")
+	//db.Exec("DROP TABLE IF EXISTS users CASCADE;")
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS users (
 			id VARCHAR(50) PRIMARY KEY,
