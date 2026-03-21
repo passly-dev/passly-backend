@@ -71,21 +71,32 @@ func main() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 
-	e.POST("/signup", func(c echo.Context) error {
-		u := new(User)
-		if err := c.Bind(u); err != nil {
-			return err
-		}
-		hashed, _ := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
-		
-		query := `INSERT INTO users (id, name, email, password_hash, icon_url, one_word, role, tech_stack, twitter_url, github_url, portfolio_url, affiliation) 
-				  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
-		_, err := db.Exec(query, u.ID, u.Name, u.Email, string(hashed), u.IconURL, u.OneWord, u.Role, u.TechStack, u.TwitterURL, u.GitHubURL, u.PortfolioURL, u.Affiliation)
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Registration failed"})
-		}
-		return c.JSON(http.StatusCreated, map[string]string{"message": "User registered successfully"})
-	})
+	// ユーザー登録（サインアップ + プロフィール設定）
+e.POST("/signup", func(c echo.Context) error {
+    var u User
+    if err := c.Bind(&u); err != nil {
+        return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request"})
+    }
+
+    // 1. パスワードのハッシュ化
+    hashedPassword, err := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
+    if err != nil {
+        return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to hash password"})
+    }
+
+    // 2. データベースへ保存
+    query := `
+    INSERT INTO users (id, name, email, password_hash, icon_url, one_word, role, tech_stack, twitter_url, github_url, portfolio_url, affiliation)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+    
+    _, err = db.Exec(query, u.ID, u.Name, u.Email, string(hashedPassword), u.IconURL, u.OneWord, u.Role, u.TechStack, u.TwitterURL, u.GitHubURL, u.PortfolioURL, u.Affiliation)
+    if err != nil {
+        // IDやEmailが重複していた場合のエラーハンドリング
+        return c.JSON(http.StatusConflict, map[string]string{"error": "User ID or Email already exists"})
+    }
+
+    return c.JSON(http.StatusCreated, map[string]string{"message": "User registered successfully"})
+})
 
 	e.GET("/users/:id", func(c echo.Context) error {
 		id := c.Param("id")
