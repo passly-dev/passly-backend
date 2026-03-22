@@ -134,6 +134,52 @@ func main() {
         return c.JSON(http.StatusOK, u)
     })
 
+	// ホーム画面用のデータ取得（総すれ違い数、今日のすれ違い数、未確認のすれ違い）
+    e.GET("/users/:id/home", func(c echo.Context) error {
+        userID := c.Param("id")
+
+        // 1. スマホに返すための「JSONの設計図（入れ物）」を準備
+        type HomeData struct {
+            TotalEncounters int                      `json:"total_encounters"`
+            TodayEncounters int                      `json:"today_encounters"`
+            Unconfirmed     []map[string]interface{} `json:"unconfirmed"`
+        }
+        var res HomeData
+
+        // 2. 今までの「総すれ違い人数」を数える
+        err := db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE my_id = $1`, userID).Scan(&res.TotalEncounters)
+        if err != nil {
+            return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to count total encounters"})
+        }
+
+        // 3. 「今日（CURRENT_DATE）すれ違った人数」を数える
+        err = db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE my_id = $1 AND DATE(created_at) = CURRENT_DATE`, userID).Scan(&res.TodayEncounters)
+        if err != nil {
+            return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to count today's encounters"})
+        }
+
+        // 4. まだポップアップで見ていない「未確認のすれ違い相手」を取得する
+        rows, err := db.Query(`
+            SELECT u.id, u.name, u.icon_url, u.one_word 
+            FROM encounters e 
+            JOIN users u ON e.target_id = u.id 
+            WHERE e.my_id = $1 AND e.is_confirmed = FALSE
+        `, userID)
+        if err == nil {
+            defer rows.Close()
+            for rows.Next() {
+                var id, name, icon, word string
+                rows.Scan(&id, &name, &icon, &word)
+                res.Unconfirmed = append(res.Unconfirmed, map[string]interface{}{
+                    "id": id, "name": name, "icon_url": icon, "one_word": word,
+                })
+            }
+        }
+
+        // 5. 集めたデータをJSONにしてスマホへ返す
+        return c.JSON(http.StatusOK, res)
+    })
+
     // ヘルスチェック用（Renderがサーバーの生存確認をするための窓口）
     e.GET("/", func(c echo.Context) error {
         return c.String(http.StatusOK, "StreetPass API Server is running!")
