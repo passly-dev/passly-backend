@@ -18,7 +18,7 @@ type User struct {
     ID           string `json:"id"`
     Name         string `json:"name"`
     Email        string `json:"email"`
-    Password     string `json:"password,omitempty"` // omitempty: 空の場合はJSONに含めない
+    Password     string `json:"password,omitempty"`
     IconURL      string `json:"icon_url"`
     OneWord      string `json:"one_word"`
     Role         string `json:"role"`
@@ -41,13 +41,12 @@ type Encounter struct {
     ID          int    `json:"id"`
     MyID        string `json:"my_id"`
     TargetID    string `json:"target_id"`
-    EventID     *int   `json:"event_id"` // nullを許容するためポインタを使用
+    EventID     *int   `json:"event_id"`
     IsConfirmed bool   `json:"is_confirmed"`
     CreatedAt   string `json:"created_at"`
 }
 
 func main() {
-    // 1. データベース接続設定
     dbURL := os.Getenv("DATABASE_URL")
     if dbURL == "" {
         dbURL = "host=localhost port=5432 user=user password=pass dbname=streetpass sslmode=disable"
@@ -59,17 +58,15 @@ func main() {
     }
     defer db.Close()
 
-    // 2. テーブルの初期化
     initDB(db)
 
-    // 3. Echoインスタンスの作成とミドルウェア設定
     e := echo.New()
     e.Use(middleware.Logger())
     e.Use(middleware.Recover())
 
     // --- エンドポイント（窓口）の定義 ---
 
-    // 【新規追加】ユーザー登録（アカウント作成＋プロフィール設定）
+    // 1. ユーザー登録（アカウント作成）
     e.POST("/signup", func(c echo.Context) error {
         var u User
         if err := c.Bind(&u); err != nil {
@@ -87,14 +84,13 @@ func main() {
         
         _, err = db.Exec(query, u.ID, u.Name, u.Email, string(hashedPassword), u.IconURL, u.OneWord, u.Role, u.TechStack, u.TwitterURL, u.GitHubURL, u.PortfolioURL, u.Affiliation)
         if err != nil {
-            log.Println("Database Error:", err) 
             return c.JSON(http.StatusConflict, map[string]string{"error": "User ID or Email already exists"})
         }
 
         return c.JSON(http.StatusCreated, map[string]string{"message": "User registered successfully"})
     })
 
-    // 【新規追加】ログイン（メールアドレスとパスワードの照合）
+    // 2. ログイン（永続ログイン用）
     e.POST("/login", func(c echo.Context) error {
         var req struct {
             Email    string `json:"email"`
@@ -122,7 +118,121 @@ func main() {
         })
     })
 
-    // 【プロフィール画面用】特定のユーザー情報の取得
+    // 3. 【ホーム画面】データ一括取得（ランダム3人追加版）
+    e.GET("/users/:id/home", func(c echo.Context) error {
+        userID := c.Param("id")
+
+        type HomeData struct {
+            TotalEncounters int                      `json:"total_encounters"`
+            TodayEncounters int                      `json:"today_encounters"`
+            Unconfirmed     []map[string]interface{} `json:"unconfirmed"`
+            RandomThree     []map[string]interface{} `json:"random_three"`
+        }
+        var res HomeData
+
+        db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE my_id = $1`, userID).Scan(&res.TotalEncounters)
+        db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE my_id = $1 AND DATE(created_at) = CURRENT_DATE`, userID).Scan(&res.TodayEncounters)
+
+        rows, _ := db.Query(`
+            SELECT u.id, u.name, u.icon_url, u.one_word 
+            FROM encounters e JOIN users u ON e.target_id = u.id 
+            WHERE e.my_id = $1 AND e.is_confirmed = FALSE`, userID)
+        defer rows.Close()
+        for rows.Next() {
+            var id, name, icon, word string
+            rows.Scan(&id, &name, &icon, &word)
+            res.Unconfirmed = append(res.Unconfirmed, map[string]interface{}{
+                "id": id, "name": name, "icon_url": icon, "one_word": word,
+            })
+        }
+
+        randRows, _ := db.Query(`
+            SELECT u.id, u.name, u.icon_url, u.one_word 
+            FROM encounters e JOIN users u ON e.target_id = u.id 
+            WHERE e.my_id = $1 AND DATE(e.created_at) = CURRENT_DATE
+            ORDER BY RANDOM() LIMIT 3`, userID)
+        defer randRows.Close()
+        for randRows.Next() {
+            var id, name, icon, word string
+            randRows.Scan(&id, &name, &icon, &word)
+            res.RandomThree = append(res.RandomThree, map[string]interface{}{
+                "id": id, "name": name, "icon_url": icon, "one_word": word,
+            })
+        }
+
+        return c.JSON(http.StatusOK, res)
+    })
+
+    // 4. 【ホーム画面】ポップアップの既読化（新規追加）
+    e.PUT("/users/:id/encounters/confirm", func(c echo.Context) error {
+        userID := c.Param("id")
+        query := `UPDATE encounters SET is_confirmed = TRUE WHERE my_id = $1 AND is_confirmed = FALSE`
+        _, err := db.Exec(query, userID)
+        if err != nil {
+            return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to update confirmation status"})
+        }
+        return c.JSON(http.StatusOK, map[string]string{"message": "Encounters marked as confirmed"})
+    })
+
+    // 5. 【カレンダー画面】日別データ取得（追加漏れ対応）
+    e.GET("/users/:id/calendar/daily", func(c echo.Context) error {
+        userID := c.Param("id")
+        dateStr := c.QueryParam("date")
+
+        type DailyData struct {
+            EncounterCount int      `json:"encounter_count"`
+            EventNames     []string `json:"event_names"`
+        }
+        var res DailyData
+
+        countQuery := `SELECT COUNT(*) FROM encounters WHERE my_id = $1 AND DATE(created_at) = $2`
+        if err := db.QueryRow(countQuery, userID, dateStr).Scan(&res.EncounterCount); err != nil {
+            return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to count encounters"})
+        }
+
+        eventQuery := `SELECT name FROM events WHERE DATE(start_at) = $1`
+        rows, err := db.Query(eventQuery, dateStr)
+        if err == nil {
+            defer rows.Close()
+            for rows.Next() {
+                var eventName string
+                rows.Scan(&eventName)
+                res.EventNames = append(res.EventNames, eventName)
+            }
+        }
+
+        return c.JSON(http.StatusOK, res)
+    })
+
+    // 6. 【広場画面】ランダム10人取得（修正反映）
+    e.GET("/users/:id/encounters", func(c echo.Context) error {
+        myID := c.Param("id")
+        query := `
+            SELECT u.id, u.name, u.icon_url, u.one_word, e.created_at, e.is_confirmed
+            FROM encounters e
+            JOIN users u ON e.target_id = u.id
+            WHERE e.my_id = $1
+            ORDER BY RANDOM() LIMIT 10`
+            
+        rows, err := db.Query(query, myID)
+        if err != nil {
+            return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Database error"})
+        }
+        defer rows.Close()
+        
+        var results []map[string]interface{}
+        for rows.Next() {
+            var id, name, icon, word, createdAt string
+            var confirmed bool
+            rows.Scan(&id, &name, &icon, &word, &createdAt, &confirmed)
+            results = append(results, map[string]interface{}{
+                "id": id, "name": name, "icon_url": icon, "one_word": word, "created_at": createdAt, "is_confirmed": confirmed,
+            })
+        }
+        return c.JSON(http.StatusOK, results)
+    })
+
+    // 7. 【プロフィール画面】ユーザー詳細取得
     e.GET("/users/:id", func(c echo.Context) error {
         id := c.Param("id")
         var u User
@@ -134,90 +244,7 @@ func main() {
         return c.JSON(http.StatusOK, u)
     })
 
-	// ホーム画面用のデータ取得（総すれ違い数、今日のすれ違い数、未確認のすれ違い）
-    e.GET("/users/:id/home", func(c echo.Context) error {
-        userID := c.Param("id")
-
-        // 1. スマホに返すための「JSONの設計図（入れ物）」を準備
-        type HomeData struct {
-            TotalEncounters int                      `json:"total_encounters"`
-            TodayEncounters int                      `json:"today_encounters"`
-            Unconfirmed     []map[string]interface{} `json:"unconfirmed"`
-        }
-        var res HomeData
-
-        // 2. 今までの「総すれ違い人数」を数える
-        err := db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE my_id = $1`, userID).Scan(&res.TotalEncounters)
-        if err != nil {
-            return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to count total encounters"})
-        }
-
-        // 3. 「今日（CURRENT_DATE）すれ違った人数」を数える
-        err = db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE my_id = $1 AND DATE(created_at) = CURRENT_DATE`, userID).Scan(&res.TodayEncounters)
-        if err != nil {
-            return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to count today's encounters"})
-        }
-
-        // 4. まだポップアップで見ていない「未確認のすれ違い相手」を取得する
-        rows, err := db.Query(`
-            SELECT u.id, u.name, u.icon_url, u.one_word 
-            FROM encounters e 
-            JOIN users u ON e.target_id = u.id 
-            WHERE e.my_id = $1 AND e.is_confirmed = FALSE
-        `, userID)
-        if err == nil {
-            defer rows.Close()
-            for rows.Next() {
-                var id, name, icon, word string
-                rows.Scan(&id, &name, &icon, &word)
-                res.Unconfirmed = append(res.Unconfirmed, map[string]interface{}{
-                    "id": id, "name": name, "icon_url": icon, "one_word": word,
-                })
-            }
-        }
-
-        // 5. 集めたデータをJSONにしてスマホへ返す
-        return c.JSON(http.StatusOK, res)
-    })
-
-    // ヘルスチェック用（Renderがサーバーの生存確認をするための窓口）
-    e.GET("/", func(c echo.Context) error {
-        return c.String(http.StatusOK, "StreetPass API Server is running!")
-    })
-    e.HEAD("/", func(c echo.Context) error {
-        return c.NoContent(http.StatusOK)
-    })
-
-    // 【イベント機能】イベントの作成と取得
-    e.POST("/events", func(c echo.Context) error {
-        ev := new(Event)
-        if err := c.Bind(ev); err != nil {
-            return err
-        }
-        query := `INSERT INTO events (name, location, start_at, end_at) VALUES ($1, $2, $3, $4) RETURNING id`
-        err := db.QueryRow(query, ev.Name, ev.Location, ev.StartAt, ev.EndAt).Scan(&ev.ID)
-        if err != nil {
-            return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to create event"})
-        }
-        return c.JSON(http.StatusCreated, ev)
-    })
-
-    e.GET("/events", func(c echo.Context) error {
-        rows, err := db.Query("SELECT id, name, location, start_at, end_at FROM events")
-        if err != nil {
-            return err
-        }
-        defer rows.Close()
-        var events []Event
-        for rows.Next() {
-            var ev Event
-            rows.Scan(&ev.ID, &ev.Name, &ev.Location, &ev.StartAt, &ev.EndAt)
-            events = append(events, ev)
-        }
-        return c.JSON(http.StatusOK, events)
-    })
-
-    // 【すれ違い保存】BLEで検知した出会いをDBに記録
+    // 【すれ違い保存】BLE通信用
     e.POST("/encounters", func(c echo.Context) error {
         enc := new(Encounter)
         if err := c.Bind(enc); err != nil {
@@ -231,33 +258,13 @@ func main() {
         return c.JSON(http.StatusCreated, enc)
     })
 
-    // 【広場画面用】すれ違い履歴と相手のプロフィール取得
-    e.GET("/users/:id/encounters", func(c echo.Context) error {
-        myID := c.Param("id")
-        query := `
-            SELECT u.id, u.name, u.icon_url, u.one_word, e.created_at, e.is_confirmed
-            FROM encounters e
-            JOIN users u ON e.target_id = u.id
-            WHERE e.my_id = $1
-            ORDER BY e.created_at DESC`
-        rows, err := db.Query(query, myID)
-        if err != nil {
-            return err
-        }
-        defer rows.Close()
-        var results []map[string]interface{}
-        for rows.Next() {
-            var id, name, icon, word, createdAt string
-            var confirmed bool
-            rows.Scan(&id, &name, &icon, &word, &createdAt, &confirmed)
-            results = append(results, map[string]interface{}{
-                "id": id, "name": name, "icon_url": icon, "one_word": word, "created_at": createdAt, "is_confirmed": confirmed,
-            })
-        }
-        return c.JSON(http.StatusOK, results)
+    e.GET("/", func(c echo.Context) error {
+        return c.String(http.StatusOK, "StreetPass API Server is running!")
+    })
+    e.HEAD("/", func(c echo.Context) error {
+        return c.NoContent(http.StatusOK)
     })
 
-    // 4. サーバー起動
     port := os.Getenv("PORT")
     if port == "" {
         port = "8080"
@@ -265,10 +272,7 @@ func main() {
     e.Logger.Fatal(e.Start(":" + port))
 }
 
-// --- データベース初期化関数 ---
-
 func initDB(db *sql.DB) {
-    
     queries := []string{
         `CREATE TABLE IF NOT EXISTS users (
             id VARCHAR(50) PRIMARY KEY,
