@@ -361,11 +361,8 @@ func main() {
 		var args []interface{}
 		argIndex := 1
 
-		// name は必須
+		// name の処理（空でも許容）
 		if name, ok := updateData["name"].(string); ok {
-			if name == "" {
-				return respondError(c, http.StatusBadRequest, "name is required")
-			}
 			updateFields = append(updateFields, fmt.Sprintf("name = $%d", argIndex))
 			args = append(args, name)
 			argIndex++
