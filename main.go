@@ -350,42 +350,62 @@ func main() {
 			return respondError(c, http.StatusNotFound, "User not found")
 		}
 
-		// リクエストボディをパース
-		var updateData struct {
-			Name         string `json:"name"`
-			OneWord      string `json:"one_word"`
-			TechStack    string `json:"tech_stack"`
-			TwitterURL   string `json:"twitter_url"`
-			GitHubURL    string `json:"github_url"`
-			PortfolioURL string `json:"portfolio_url"`
-			Affiliation  string `json:"affiliation"`
-		}
+		// リクエストボディをパース（パーシャル更新対応）
+		var updateData map[string]interface{}
 		if err := c.Bind(&updateData); err != nil {
 			return respondError(c, http.StatusBadRequest, "Invalid request format")
 		}
 
-		// ユーザー情報を更新
-		updateQuery := `
-		UPDATE users 
-		SET name = $1, 
-		    one_word = $2, 
-		    tech_stack = $3, 
-		    twitter_url = $4, 
-		    github_url = $5, 
-		    portfolio_url = $6, 
-		    affiliation = $7, 
-		    updated_at = CURRENT_TIMESTAMP 
-		WHERE id = $8`
+		// 動的なUPDATEクエリを構築
+		var updateFields []string
+		var args []interface{}
+		argIndex := 1
 
-		_, err = db.Exec(updateQuery,
-			updateData.Name,
-			updateData.OneWord,
-			updateData.TechStack,
-			updateData.TwitterURL,
-			updateData.GitHubURL,
-			updateData.PortfolioURL,
-			updateData.Affiliation,
-			userID)
+		// name は必須
+		if name, ok := updateData["name"].(string); ok {
+			if name == "" {
+				return respondError(c, http.StatusBadRequest, "name is required")
+			}
+			updateFields = append(updateFields, fmt.Sprintf("name = $%d", argIndex))
+			args = append(args, name)
+			argIndex++
+		}
+
+		// オプショナルフィールド
+		optionalFields := map[string]string{
+			"one_word":      "one_word",
+			"tech_stack":    "tech_stack",
+			"twitter_url":   "twitter_url",
+			"github_url":    "github_url",
+			"portfolio_url": "portfolio_url",
+			"affiliation":   "affiliation",
+		}
+
+		for jsonKey, dbCol := range optionalFields {
+			if value, ok := updateData[jsonKey].(string); ok {
+				updateFields = append(updateFields, fmt.Sprintf("%s = $%d", dbCol, argIndex))
+				args = append(args, value)
+				argIndex++
+			}
+		}
+
+		// 更新フィールドがない場合
+		if len(updateFields) == 0 {
+			return respondError(c, http.StatusBadRequest, "No fields to update")
+		}
+
+		// updated_at を追加
+		updateFields = append(updateFields, "updated_at = CURRENT_TIMESTAMP")
+
+		// クエリを構築して実行
+		updateQuery := fmt.Sprintf(
+			"UPDATE users SET %s WHERE id = $%d",
+			strings.Join(updateFields, ", "),
+			argIndex,
+		)
+		args = append(args, userID)
+
+		_, err = db.Exec(updateQuery, args...)
 		if err != nil {
 			log.Printf("Failed to update user: %v", err)
 			return respondError(c, http.StatusInternalServerError, "failed to update user profile")
