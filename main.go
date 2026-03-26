@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/lib/pq"
@@ -52,6 +56,14 @@ func respondError(c echo.Context, status int, message string) error {
 	return c.JSON(status, map[string]string{"error": message})
 }
 
+func getFileExt(filename string) string {
+	parts := strings.Split(filename, ".")
+	if len(parts) > 1 {
+		return "." + parts[len(parts)-1]
+	}
+	return ".jpg"
+}
+
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -63,6 +75,20 @@ func main() {
 		log.Fatal(err)
 	}
 	defer db.Close()
+
+	// Firebase 初期化
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	firebaseServiceAccount := os.Getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+	firebaseBucket := os.Getenv("FIREBASE_STORAGE_BUCKET")
+	if firebaseServiceAccount == "" {
+		log.Println("⚠️  FIREBASE_SERVICE_ACCOUNT_PATH not set - avatar upload disabled")
+	} else if err := InitFirebase(ctx, firebaseServiceAccount, firebaseBucket); err != nil {
+		log.Printf("Firebase init error: %v (continuing without upload)\n", err)
+	} else {
+		log.Println("✓ Firebase Storage initialized")
+	}
 
 	initDB(db)
 
@@ -307,6 +333,71 @@ func main() {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "User not found"})
 		}
 		return c.JSON(http.StatusOK, u)
+	})
+
+	// 7.1. 【ユーザーアバター】画像アップロード（Firebase Storage）
+	e.POST("/users/:id/avatar", func(c echo.Context) error {
+		userID := c.Param("id")
+
+		// ユーザー存在確認
+		var exists bool
+		err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists)
+		if err != nil || !exists {
+			return respondError(c, http.StatusNotFound, "User not found")
+		}
+
+		// ファイル受け取り
+		file, err := c.FormFile("avatar")
+		if err != nil {
+			return respondError(c, http.StatusBadRequest, "avatar file is required")
+		}
+
+		// ファイルサイズチェック（5MB上限）
+		const maxSize = 5 * 1024 * 1024
+		if file.Size > maxSize {
+			return respondError(c, http.StatusBadRequest, fmt.Sprintf("file size exceeds %d bytes", maxSize))
+		}
+
+		// ファイル形式チェック
+		allowedMimes := map[string]bool{
+			"image/jpeg": true,
+			"image/png":  true,
+			"image/gif":  true,
+			"image/webp": true,
+		}
+		if !allowedMimes[file.Header.Get("Content-Type")] {
+			return respondError(c, http.StatusBadRequest, "only JPEG, PNG, GIF, WebP allowed")
+		}
+
+		// Firebase にアップロード
+		src, err := file.Open()
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "failed to read file")
+		}
+
+		// ファイル名を生成（user_id + uuid）
+		fileName := fmt.Sprintf("%s_%s%s", userID, uuid.New().String(), getFileExt(file.Filename))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		avatarURL, err := UploadUserAvatar(ctx, userID, src, fileName)
+		if err != nil {
+			log.Printf("Firebase upload error: %v", err)
+			return respondError(c, http.StatusInternalServerError, "failed to upload avatar")
+		}
+
+		// DB 更新
+		updateQuery := `UPDATE users SET icon_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
+		_, err = db.Exec(updateQuery, avatarURL, userID)
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "failed to update user profile")
+		}
+
+		return c.JSON(http.StatusOK, map[string]string{
+			"message":  "Avatar uploaded successfully",
+			"icon_url": avatarURL,
+		})
 	})
 
 	// 【すれ違い保存】BLE通信用

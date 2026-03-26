@@ -1,0 +1,4 @@
+FIREBASE_SERVICE_ACCOUNT_PATH=./service-account-key.json
+FIREBASE_STORAGE_BUCKET=streetpass-14b0d.firebasestorage.app
+DATABASE_URL=postgres://:パスワード@localhost:5432/streetpass?sslmode=disable
+PORT=8080
