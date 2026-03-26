@@ -335,7 +335,64 @@ func main() {
 		return c.JSON(http.StatusOK, u)
 	})
 
-	// 7.1. 【ユーザーアバター】画像アップロード（Firebase Storage）
+	// 7.2. 【プロフィール画面】ユーザーデータ更新
+	e.PATCH("/users/:id", func(c echo.Context) error {
+		userID := c.Param("id")
+
+		// ユーザー存在確認
+		var exists bool
+		err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists)
+		if err != nil || !exists {
+			return respondError(c, http.StatusNotFound, "User not found")
+		}
+
+		// リクエストボディをパース
+		var updateData struct {
+			Name         string `json:"name"`
+			OneWord      string `json:"one_word"`
+			TechStack    string `json:"tech_stack"`
+			TwitterURL   string `json:"twitter_url"`
+			GitHubURL    string `json:"github_url"`
+			PortfolioURL string `json:"portfolio_url"`
+			Affiliation  string `json:"affiliation"`
+		}
+		if err := c.Bind(&updateData); err != nil {
+			return respondError(c, http.StatusBadRequest, "Invalid request format")
+		}
+
+		// ユーザー情報を更新
+		updateQuery := `
+		UPDATE users 
+		SET name = $1, 
+		    one_word = $2, 
+		    tech_stack = $3, 
+		    twitter_url = $4, 
+		    github_url = $5, 
+		    portfolio_url = $6, 
+		    affiliation = $7, 
+		    updated_at = CURRENT_TIMESTAMP 
+		WHERE id = $8`
+
+		_, err = db.Exec(updateQuery,
+			updateData.Name,
+			updateData.OneWord,
+			updateData.TechStack,
+			updateData.TwitterURL,
+			updateData.GitHubURL,
+			updateData.PortfolioURL,
+			updateData.Affiliation,
+			userID)
+		if err != nil {
+			log.Printf("Failed to update user: %v", err)
+			return respondError(c, http.StatusInternalServerError, "failed to update user profile")
+		}
+
+		return c.JSON(http.StatusOK, map[string]string{
+			"message": "User profile updated successfully",
+		})
+	})
+
+	// 7.3. 【ユーザーアバター】画像アップロード（Firebase Storage）
 	e.POST("/users/:id/avatar", func(c echo.Context) error {
 		userID := c.Param("id")
 
