@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/lib/pq"
@@ -65,6 +66,9 @@ func getFileExt(filename string) string {
 }
 
 func main() {
+	// .env ファイルを読み込む
+	godotenv.Load()
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "host=localhost port=5432 user=user password=pass dbname=streetpass sslmode=disable"
