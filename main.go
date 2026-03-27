@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -417,10 +418,27 @@ func main() {
 	e.GET("/users/:id", func(c echo.Context) error {
 		id := c.Param("id")
 		var u User
-		query := `SELECT id, name, icon_url, one_word, role, tech_stack, twitter_url, github_url, portfolio_url, affiliation, connpass_username FROM users WHERE id = $1`
+		query := `SELECT
+			id,
+			name,
+			COALESCE(icon_url, ''),
+			COALESCE(one_word, ''),
+			COALESCE(role, 'other'),
+			COALESCE(tech_stack, ''),
+			COALESCE(twitter_url, ''),
+			COALESCE(github_url, ''),
+			COALESCE(portfolio_url, ''),
+			COALESCE(affiliation, ''),
+			COALESCE(connpass_username, '')
+		FROM users
+		WHERE id = $1`
 		err := db.QueryRow(query, id).Scan(&u.ID, &u.Name, &u.IconURL, &u.OneWord, &u.Role, &u.TechStack, &u.TwitterURL, &u.GitHubURL, &u.PortfolioURL, &u.Affiliation, &u.ConnpassUsername)
 		if err != nil {
-			return c.JSON(http.StatusNotFound, map[string]string{"error": "User not found"})
+			if errors.Is(err, sql.ErrNoRows) {
+				return c.JSON(http.StatusNotFound, map[string]string{"error": "User not found"})
+			}
+			log.Printf("GET /users/:id query error (id=%s): %v", id, err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Database error"})
 		}
 		return c.JSON(http.StatusOK, u)
 	})
