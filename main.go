@@ -354,38 +354,34 @@ func main() {
 
 	e.GET("/users/:id/calendar/daily", func(c echo.Context) error {
 		userID := c.Param("id")
-		dateStr := c.QueryParam("date")
-		if dateStr == "" {
-			dateStr = time.Now().Format("2006-01-02")
+		yearMonth := c.QueryParam("month")
+		if yearMonth == "" {
+		yearMonth = time.Now().Format("2006-01")
 		}
 
-		type DailyData struct {
-			EncounterCount int      `json:"encounter_count"`
-			EventNames     []string `json:"event_names"`
-		}
-		var res DailyData
-
-		countQuery := `SELECT COUNT(*) FROM encounters WHERE my_id = $1 AND DATE(created_at) = $2`
-		if err := db.QueryRow(countQuery, userID, dateStr).Scan(&res.EncounterCount); err != nil {
-			return respondError(c, http.StatusInternalServerError, "Failed to count encounters")
-		}
-
-		eventQuery := `SELECT name FROM events WHERE DATE(start_at) = $1`
-		rows, err := db.Query(eventQuery, dateStr)
+		qurey := `
+			SELECT DATE(created_at) as date, COUNT(*) as count
+			FROM wncountters
+			WHERE my_id = $1 AND TO_CHAR(created_at, 'YYYY-MM') = $2
+			GROUP BY DATE(created_at)
+		`
+		rows, err := db.Query(qurey, userID, yearMonth)
 		if err != nil {
-			return respondError(c, http.StatusInternalServerError, "Failed to query events")
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch monthly data"})
 		}
 		defer rows.Close()
 
+		monthlyData := make(map[string]int)
 		for rows.Next() {
-			var eventName string
-			if err := rows.Scan(&eventName); err != nil {
-				return respondError(c, http.StatusInternalServerError, "Failed to read event rows")
+			var date time.Time
+			var count int
+			if err := rows.Scan(&date, &count); err != nil {
+				return c.JSON(http.StatusInternalServerError,map[string]string{"error": "Failed to scan row"})
 			}
-			res.EventNames = append(res.EventNames, eventName)
+			monthlyData[date.Format("2006-01-02")] = count
 		}
 
-		return c.JSON(http.StatusOK, res)
+		return c.JSON(http.StatusOK,monthlyData)
 	})
 
 	e.GET("/users/:id/encounters", func(c echo.Context) error {
