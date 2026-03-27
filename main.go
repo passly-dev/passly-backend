@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -34,16 +35,28 @@ type User struct {
 	GitHubURL    string `json:"github_url"`
 	PortfolioURL string `json:"portfolio_url"`
 	Affiliation  string `json:"affiliation"`
+	ConnpassUsername string `json:"connpass_username"`
+}
+
+type ConnpassResponse struct {
+	Events []ConnpassEvent `json:"events"`
+}
+
+type ConnpassEvent struct {
+	EventID   int    `json:"event_id"`
+	Title     string `json:"title"`
+	Place     string `json:"place"`
+	StartedAt string `json:"start_at"`
+	EndedAt   string `json:"end_at"`
 }
 
 type Event struct {
-	ID       int    `json:"id"`
-	Name     string `json:"name"`
-	Location string `json:"location"`
-	StartAt  string `json:"start_at"`
-	EndAt    string `json:"end_at"`
+	ID       int       `json:"id"`
+	Name     string    `json:"name"`
+	Location string    `json:"location"`
+	StartAt  time.Time `json:"start_at"`
+	EndAt    time.Time `json:"end_at"`
 }
-
 type Encounter struct {
 	ID          int    `json:"id"`
 	MyID        string `json:"my_id"`
@@ -65,6 +78,61 @@ func getFileExt(filename string) string {
 	return ".jpg"
 }
 
+func GetConnpassEvents(c echo.Context) error {
+	url := "https://connpass.com/api/v1/event/?keyword=Go&count=5"
+	resp, err := http.Get(url)
+	var connpassData ConnpassResponse
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch events"})
+	}
+	err = json.NewDecoder(resp.Body).Decode(&connpassData)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to decode events"})
+	}
+
+	var frontendEvents []Event
+	for _, ce := range connpassData.Events {
+		startAt, _ := time.Parse(time.RFC3339, ce.StartedAt)
+		endAt, _ := time.Parse(time.RFC3339, ce.EndedAt)
+		frontendEvents = append(frontendEvents, Event{
+			ID:       ce.EventID,
+			Name:     ce.Title,
+			Location: ce.Place,
+			StartAt:  startAt,
+			EndAt:    endAt,
+		})
+	}
+	return c.JSON(http.StatusOK, frontendEvents)
+}
+
+func GetUserConnpassEvents(c echo.Context) error {
+	username := c.Param("username")
+
+	url:= "https://connpass.com/api/v1/event/?owner_account=" + username
+	resp, err := http.Get(url)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch events"})
+	}
+	var connpassData ConnpassResponse
+	err = json.NewDecoder(resp.Body).Decode(&connpassData)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to decode events"})
+	}
+
+	var frontendEvents []Event
+	for _, ce := range connpassData.Events {
+		startAt, _ := time.Parse(time.RFC3339, ce.StartedAt)
+		endAt, _ := time.Parse(time.RFC3339, ce.EndedAt)
+		frontendEvents = append(frontendEvents, Event{
+			ID:       ce.EventID,
+			Name:     ce.Title,
+			Location: ce.Place,
+			StartAt:  startAt,
+			EndAt:    endAt,
+		})
+	}
+	return c.JSON(http.StatusOK, frontendEvents)
+}
 func main() {
 	// .env ファイルを読み込む
 	godotenv.Load()
@@ -331,8 +399,8 @@ func main() {
 	e.GET("/users/:id", func(c echo.Context) error {
 		id := c.Param("id")
 		var u User
-		query := `SELECT id, name, icon_url, one_word, role, tech_stack, twitter_url, github_url, portfolio_url, affiliation FROM users WHERE id = $1`
-		err := db.QueryRow(query, id).Scan(&u.ID, &u.Name, &u.IconURL, &u.OneWord, &u.Role, &u.TechStack, &u.TwitterURL, &u.GitHubURL, &u.PortfolioURL, &u.Affiliation)
+		query := `SELECT id, name, icon_url, one_word, role, tech_stack, twitter_url, github_url, portfolio_url, affiliation, connpass_username FROM users WHERE id = $1`
+		err := db.QueryRow(query, id).Scan(&u.ID, &u.Name, &u.IconURL, &u.OneWord, &u.Role, &u.TechStack, &u.TwitterURL, &u.GitHubURL, &u.PortfolioURL, &u.Affiliation, &u.ConnpassUsername)
 		if err != nil {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "User not found"})
 		}
@@ -376,6 +444,7 @@ func main() {
 			"github_url":    "github_url",
 			"portfolio_url": "portfolio_url",
 			"affiliation":   "affiliation",
+			"connpass_username": "connpass_username",
 		}
 
 		for jsonKey, dbCol := range optionalFields {
@@ -479,6 +548,8 @@ func main() {
 	})
 
 	// 【すれ違い保存】BLE通信用
+	e.GET("/events", GetConnpassEvents)
+	e.GET("/users/:username/events", GetUserConnpassEvents)
 	e.POST("/encounters", func(c echo.Context) error {
 		enc := new(Encounter)
 		if err := c.Bind(enc); err != nil {
@@ -521,6 +592,7 @@ func initDB(db *sql.DB) {
             github_url TEXT,
             portfolio_url TEXT,
             affiliation TEXT,
+			connpass_username VARCHAR(255),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );`,
