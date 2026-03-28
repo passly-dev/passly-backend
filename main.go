@@ -106,6 +106,37 @@ func getEncounterCooldownSeconds() int {
 	return parsed
 }
 
+func resolveUserIDFromToken(db *sql.DB, token string) (string, error) {
+	if token == "" {
+		return "", errors.New("token is required")
+	}
+
+	// 新方式: DB保存済みの短いトークンを優先解決
+	var resolvedUserID string
+	query := `
+		SELECT user_id
+		FROM ephemeral_tokens
+		WHERE token = $1 AND expires_at > CURRENT_TIMESTAMP
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+	err := db.QueryRow(query, token).Scan(&resolvedUserID)
+	if err == nil {
+		return resolvedUserID, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("failed to resolve token from db: %w", err)
+	}
+
+	// 旧方式との後方互換: Base64デコードも許容
+	decoded, decodeErr := base64.StdEncoding.DecodeString(token)
+	if decodeErr != nil {
+		return "", errors.New("invalid token")
+	}
+
+	return string(decoded), nil
+}
+
 func GetConnpassEvents(c echo.Context) error {
 	url := "https://connpass.com/api/v1/event/?keyword=Go&count=5"
 	resp, err := http.Get(url)
@@ -247,37 +278,15 @@ func main() {
 			return respondError(c, http.StatusBadRequest, "token or ephemeral_id is required")
 		}
 
-		// 新方式: DB保存済みの短いトークンを優先解決
-		var resolvedUserID string
-		query := `
-			SELECT user_id
-			FROM ephemeral_tokens
-			WHERE token = $1 AND expires_at > CURRENT_TIMESTAMP
-			ORDER BY created_at DESC
-			LIMIT 1
-		`
-		err := db.QueryRow(query, token).Scan(&resolvedUserID)
-		if err == nil {
-			log.Printf("resolve success token=%s user_id=%s", token, resolvedUserID)
-			return c.JSON(http.StatusOK, map[string]string{
-				"user_id": resolvedUserID,
-			})
-		}
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			log.Printf("resolve db error token=%s err=%v", token, err)
-			return respondError(c, http.StatusInternalServerError, "Failed to resolve token")
-		}
-
-		// 旧方式との後方互換: Base64デコードも許容
-		decoded, decodeErr := base64.StdEncoding.DecodeString(token)
-		if decodeErr != nil {
-			log.Printf("resolve invalid token=%s", token)
+		resolvedUserID, err := resolveUserIDFromToken(db, token)
+		if err != nil {
+			log.Printf("resolve failed token=%s err=%v", token, err)
 			return respondError(c, http.StatusBadRequest, "Invalid token")
 		}
-		log.Printf("resolve fallback(base64) token=%s user_id=%s", token, string(decoded))
+		log.Printf("resolve success token=%s user_id=%s", token, resolvedUserID)
 
 		return c.JSON(http.StatusOK, map[string]string{
-			"user_id": string(decoded),
+			"user_id": resolvedUserID,
 		})
 	})
 
@@ -745,12 +754,52 @@ func main() {
 
 	// --- すれ違い保存（重複排除・クールタイム付き） ---
 	e.POST("/encounters", func(c echo.Context) error {
-		enc := new(Encounter)
-		if err := c.Bind(enc); err != nil {
+		var req struct {
+			MyID        string `json:"my_id"`
+			TargetID    string `json:"target_id"`
+			TargetToken string `json:"target_token"`
+			Token       string `json:"token"`
+			EphemeralID string `json:"ephemeral_id"`
+			EventID     *int   `json:"event_id"`
+		}
+		if err := c.Bind(&req); err != nil {
 			return respondError(c, http.StatusBadRequest, "Invalid request format")
 		}
-		if enc.MyID == "" || enc.TargetID == "" {
-			return respondError(c, http.StatusBadRequest, "my_id and target_id are required")
+
+		enc := &Encounter{
+			MyID:     req.MyID,
+			TargetID: req.TargetID,
+			EventID:  req.EventID,
+		}
+
+		if enc.MyID == "" {
+			return respondError(c, http.StatusBadRequest, "my_id is required")
+		}
+
+		if enc.TargetID == "" {
+			token := req.TargetToken
+			if token == "" {
+				token = req.EphemeralID
+			}
+			if token == "" {
+				token = req.Token
+			}
+			if token == "" {
+				return respondError(c, http.StatusBadRequest, "target_id or target_token is required")
+			}
+
+			resolvedTargetID, err := resolveUserIDFromToken(db, token)
+			if err != nil {
+				log.Printf("encounter token resolve failed my_id=%s token=%s err=%v", enc.MyID, token, err)
+				return respondError(c, http.StatusBadRequest, "invalid target token")
+			}
+			enc.TargetID = resolvedTargetID
+		}
+
+		if enc.MyID == enc.TargetID {
+			return c.JSON(http.StatusOK, map[string]string{
+				"message": "self encounter ignored",
+			})
 		}
 
 		log.Printf("encounter request my_id=%s target_id=%s", enc.MyID, enc.TargetID)
