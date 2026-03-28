@@ -805,6 +805,28 @@ func main() {
 
 		log.Printf("encounter request my_id=%s target_id=%s", enc.MyID, enc.TargetID)
 
+		// 同じ相手とのすれ違いは1日1回まで
+		var existsToday bool
+		todayCheckQuery := `
+			SELECT EXISTS (
+				SELECT 1 FROM encounters
+				WHERE ((my_id = $1 AND target_id = $2) OR (my_id = $2 AND target_id = $1))
+				AND DATE(created_at) = CURRENT_DATE
+			)
+		`
+		err := db.QueryRow(todayCheckQuery, enc.MyID, enc.TargetID).Scan(&existsToday)
+		if err != nil {
+			log.Printf("encounter daily-check error my_id=%s target_id=%s err=%v", enc.MyID, enc.TargetID, err)
+			return respondError(c, http.StatusInternalServerError, "Database error during daily duplicate check")
+		}
+
+		if existsToday {
+			log.Printf("encounter skipped same-day my_id=%s target_id=%s", enc.MyID, enc.TargetID)
+			return c.JSON(http.StatusOK, map[string]string{
+				"message": "Encounter skipped because this pair already met today",
+			})
+		}
+
 		// 直近クールダウン内の重複を抑制
 		var exists bool
 		checkQuery := `
@@ -814,7 +836,7 @@ func main() {
 				AND created_at > CURRENT_TIMESTAMP - ($3 * INTERVAL '1 second')
 			)
 		`
-		err := db.QueryRow(checkQuery, enc.MyID, enc.TargetID, encounterCooldownSeconds).Scan(&exists)
+		err = db.QueryRow(checkQuery, enc.MyID, enc.TargetID, encounterCooldownSeconds).Scan(&exists)
 		if err != nil {
 			log.Printf("encounter duplicate-check error my_id=%s target_id=%s err=%v", enc.MyID, enc.TargetID, err)
 			return respondError(c, http.StatusInternalServerError, "Database error during duplicate check")
