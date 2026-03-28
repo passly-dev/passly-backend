@@ -319,24 +319,59 @@ func main() {
 			})
 		}
 
-		randRows, err := db.Query(`
-            SELECT u.id, u.name, u.icon_url, u.one_word 
-            FROM encounters e JOIN users u ON e.target_id = u.id 
+		loadRandomThree := func(query string, args ...interface{}) ([]map[string]interface{}, error) {
+			randRows, err := db.Query(query, args...)
+			if err != nil {
+				return nil, err
+			}
+			defer randRows.Close()
+
+			result := make([]map[string]interface{}, 0, 3)
+			for randRows.Next() {
+				var id, name, icon, word string
+				if err := randRows.Scan(&id, &name, &icon, &word); err != nil {
+					return nil, err
+				}
+				result = append(result, map[string]interface{}{
+					"id": id, "name": name, "icon_url": icon, "one_word": word,
+				})
+			}
+			if err := randRows.Err(); err != nil {
+				return nil, err
+			}
+			return result, nil
+		}
+
+		res.RandomThree, err = loadRandomThree(`
+            SELECT u.id, u.name, u.icon_url, u.one_word
+            FROM encounters e JOIN users u ON e.target_id = u.id
             WHERE e.my_id = $1 AND DATE(e.created_at) = CURRENT_DATE
-            ORDER BY RANDOM() LIMIT 3`, userID)
+            ORDER BY RANDOM()
+            LIMIT 3`, userID)
 		if err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to query random encounters")
 		}
-		defer randRows.Close()
 
-		for randRows.Next() {
-			var id, name, icon, word string
-			if err := randRows.Scan(&id, &name, &icon, &word); err != nil {
-				return respondError(c, http.StatusInternalServerError, "Failed to scan random encounter record")
+		if len(res.RandomThree) == 0 {
+			res.RandomThree, err = loadRandomThree(`
+                SELECT id, name, icon_url, one_word
+                FROM (
+                    SELECT DISTINCT ON (u.id)
+                        u.id,
+                        u.name,
+                        COALESCE(u.icon_url, '') AS icon_url,
+                        COALESCE(u.one_word, '') AS one_word,
+                        e.created_at
+                    FROM encounters e
+                    JOIN users u ON e.target_id = u.id
+                    WHERE e.my_id = $1
+                    ORDER BY u.id, e.created_at DESC
+                ) latest
+                ORDER BY created_at DESC
+                LIMIT 3`, userID)
+			if err != nil {
+				return respondError(c, http.StatusInternalServerError, "Failed to query fallback random encounters")
 			}
-			res.RandomThree = append(res.RandomThree, map[string]interface{}{
-				"id": id, "name": name, "icon_url": icon, "one_word": word,
-			})
 		}
 
 		return c.JSON(http.StatusOK, res)
