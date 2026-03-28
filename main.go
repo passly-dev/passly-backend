@@ -350,17 +350,19 @@ func main() {
 		}
 		var res HomeData
 
-		if err := db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE my_id = $1`, userID).Scan(&res.TotalEncounters); err != nil {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE my_id = $1 OR target_id = $1`, userID).Scan(&res.TotalEncounters); err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to count total encounters")
 		}
-		if err := db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE my_id = $1 AND DATE(created_at) = CURRENT_DATE`, userID).Scan(&res.TodayEncounters); err != nil {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE (my_id = $1 OR target_id = $1) AND DATE(created_at) = CURRENT_DATE`, userID).Scan(&res.TodayEncounters); err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to count today encounters")
 		}
 
 		rows, err := db.Query(`
-            SELECT u.id, u.name, u.icon_url, u.one_word 
-            FROM encounters e JOIN users u ON e.target_id = u.id 
-            WHERE e.my_id = $1 AND e.is_confirmed = FALSE`, userID)
+            SELECT u.id, u.name, u.icon_url, u.one_word
+            FROM encounters e
+            JOIN users u ON u.id = CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END
+            WHERE (e.my_id = $1 OR e.target_id = $1)
+              AND e.is_confirmed = FALSE`, userID)
 		if err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to query unconfirmed encounters")
 		}
@@ -401,8 +403,10 @@ func main() {
 
 		res.RandomThree, err = loadRandomThree(`
             SELECT u.id, u.name, u.icon_url, u.one_word
-            FROM encounters e JOIN users u ON e.target_id = u.id
-            WHERE e.my_id = $1 AND DATE(e.created_at) = CURRENT_DATE
+						FROM encounters e
+						JOIN users u ON u.id = CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END
+						WHERE (e.my_id = $1 OR e.target_id = $1)
+							AND DATE(e.created_at) = CURRENT_DATE
             ORDER BY RANDOM()
             LIMIT 3`, userID)
 		if err != nil {
@@ -420,8 +424,8 @@ func main() {
                         COALESCE(u.one_word, '') AS one_word,
                         e.created_at
                     FROM encounters e
-                    JOIN users u ON e.target_id = u.id
-                    WHERE e.my_id = $1
+					JOIN users u ON u.id = CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END
+					WHERE e.my_id = $1 OR e.target_id = $1
                     ORDER BY u.id, e.created_at DESC
                 ) latest
                 ORDER BY created_at DESC
@@ -448,8 +452,8 @@ func main() {
 					e.created_at,
 					e.is_confirmed
 				FROM encounters e
-				JOIN users u ON e.target_id = u.id
-				WHERE e.my_id = $1
+				JOIN users u ON u.id = CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END
+				WHERE e.my_id = $1 OR e.target_id = $1
 				ORDER BY u.id, e.created_at DESC
 			) latest
 			ORDER BY RANDOM()
@@ -487,7 +491,7 @@ func main() {
 
 	e.PUT("/users/:id/encounters/confirm", func(c echo.Context) error {
 		userID := c.Param("id")
-		query := `UPDATE encounters SET is_confirmed = TRUE WHERE my_id = $1 AND is_confirmed = FALSE`
+		query := `UPDATE encounters SET is_confirmed = TRUE WHERE (my_id = $1 OR target_id = $1) AND is_confirmed = FALSE`
 		_, err := db.Exec(query, userID)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to update confirmation status"})
@@ -510,7 +514,7 @@ func main() {
 		}
 		var res DailyData
 
-		countQuery := `SELECT COUNT(*) FROM encounters WHERE my_id = $1 AND DATE(created_at) = $2`
+		countQuery := `SELECT COUNT(*) FROM encounters WHERE (my_id = $1 OR target_id = $1) AND DATE(created_at) = $2`
 		if err := db.QueryRow(countQuery, userID, dateStr).Scan(&res.EncounterCount); err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to count encounters")
 		}
@@ -545,7 +549,7 @@ func main() {
 		query := `
             SELECT DATE(created_at) as date, COUNT(*) as count
             FROM encounters
-            WHERE my_id = $1 AND TO_CHAR(created_at, 'YYYY-MM') = $2
+			WHERE (my_id = $1 OR target_id = $1) AND TO_CHAR(created_at, 'YYYY-MM') = $2
             GROUP BY DATE(created_at)
         `
 		rows, err := db.Query(query, userID, yearMonth)
