@@ -180,21 +180,31 @@ func main() {
 		userID := c.Param("id")
 		// 理由: ユーザーIDをBase64エンコードし、暗号化された本物のトークンのように見せかけるため。
 		token := base64.StdEncoding.EncodeToString([]byte(userID))
+		expiresAt := time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339)
 		return c.JSON(http.StatusOK, map[string]string{
 			"token":      token,
 			"expires_in": "3600",
+			"expires_at": expiresAt,
 		})
 	})
 
 	e.POST("/encounters/resolve", func(c echo.Context) error {
 		var req struct {
-			Token string `json:"token"`
+			Token       string `json:"token"`
+			EphemeralID string `json:"ephemeral_id"`
 		}
 		if err := c.Bind(&req); err != nil {
 			return respondError(c, http.StatusBadRequest, "Invalid request")
 		}
+		token := req.Token
+		if token == "" {
+			token = req.EphemeralID
+		}
+		if token == "" {
+			return respondError(c, http.StatusBadRequest, "token or ephemeral_id is required")
+		}
 		// 理由: 送られてきたBase64文字列を元のユーザーIDに復号(デコード)して返すため。
-		decoded, err := base64.StdEncoding.DecodeString(req.Token)
+		decoded, err := base64.StdEncoding.DecodeString(token)
 		if err != nil {
 			return respondError(c, http.StatusBadRequest, "Invalid token")
 		}
