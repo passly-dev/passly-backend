@@ -776,6 +776,7 @@ func main() {
 			return respondError(c, http.StatusBadRequest, "my_id is required")
 		}
 
+		enc.TargetID = req.TargetID
 		if enc.TargetID == "" {
 			token := req.TargetToken
 			if token == "" {
@@ -809,7 +810,7 @@ func main() {
 		checkQuery := `
 			SELECT EXISTS (
 				SELECT 1 FROM encounters 
-				WHERE my_id = $1 AND target_id = $2 
+				WHERE ( (my_id = $1 AND target_id = $2) OR (my_id = $2 AND target_id = $1) )
 				AND created_at > CURRENT_TIMESTAMP - ($3 * INTERVAL '1 second')
 			)
 		`
