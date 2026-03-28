@@ -342,6 +342,57 @@ func main() {
 		return c.JSON(http.StatusOK, res)
 	})
 
+	e.GET("/users/:id/encounters", func(c echo.Context) error {
+		userID := c.Param("id")
+
+		rows, err := db.Query(`
+			SELECT id, name, icon_url, one_word, created_at, is_confirmed
+			FROM (
+				SELECT DISTINCT ON (u.id)
+					u.id,
+					u.name,
+					COALESCE(u.icon_url, '') AS icon_url,
+					COALESCE(u.one_word, '') AS one_word,
+					e.created_at,
+					e.is_confirmed
+				FROM encounters e
+				JOIN users u ON e.target_id = u.id
+				WHERE e.my_id = $1
+				ORDER BY u.id, e.created_at DESC
+			) latest
+			ORDER BY RANDOM()
+			LIMIT 10
+		`, userID)
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "Failed to query encounters")
+		}
+		defer rows.Close()
+
+		type PlazaEncounter struct {
+			ID          string    `json:"id"`
+			Name        string    `json:"name"`
+			IconURL     string    `json:"icon_url"`
+			OneWord     string    `json:"one_word"`
+			CreatedAt   time.Time `json:"created_at"`
+			IsConfirmed bool      `json:"is_confirmed"`
+		}
+
+		encounters := make([]PlazaEncounter, 0)
+		for rows.Next() {
+			var item PlazaEncounter
+			if err := rows.Scan(&item.ID, &item.Name, &item.IconURL, &item.OneWord, &item.CreatedAt, &item.IsConfirmed); err != nil {
+				return respondError(c, http.StatusInternalServerError, "Failed to scan encounter record")
+			}
+			encounters = append(encounters, item)
+		}
+
+		if err := rows.Err(); err != nil {
+			return respondError(c, http.StatusInternalServerError, "Failed to iterate encounters")
+		}
+
+		return c.JSON(http.StatusOK, encounters)
+	})
+
 	e.PUT("/users/:id/encounters/confirm", func(c echo.Context) error {
 		userID := c.Param("id")
 		query := `UPDATE encounters SET is_confirmed = TRUE WHERE my_id = $1 AND is_confirmed = FALSE`
@@ -353,76 +404,76 @@ func main() {
 	})
 
 	// 1. 【復旧】正しい daily API (1日分のデータを返す)
-    // 理由: フロントエンドが現在このAPIを使ってカレンダーを描画しているため、まずは正しく動く状態に戻す。
-    e.GET("/users/:id/calendar/daily", func(c echo.Context) error {
-        userID := c.Param("id")
-        dateStr := c.QueryParam("date")
-        if dateStr == "" {
-            dateStr = time.Now().Format("2006-01-02")
-        }
+	// 理由: フロントエンドが現在このAPIを使ってカレンダーを描画しているため、まずは正しく動く状態に戻す。
+	e.GET("/users/:id/calendar/daily", func(c echo.Context) error {
+		userID := c.Param("id")
+		dateStr := c.QueryParam("date")
+		if dateStr == "" {
+			dateStr = time.Now().Format("2006-01-02")
+		}
 
-        type DailyData struct {
-            EncounterCount int      `json:"encounter_count"`
-            EventNames     []string `json:"event_names"`
-        }
-        var res DailyData
+		type DailyData struct {
+			EncounterCount int      `json:"encounter_count"`
+			EventNames     []string `json:"event_names"`
+		}
+		var res DailyData
 
-        countQuery := `SELECT COUNT(*) FROM encounters WHERE my_id = $1 AND DATE(created_at) = $2`
-        if err := db.QueryRow(countQuery, userID, dateStr).Scan(&res.EncounterCount); err != nil {
-            return respondError(c, http.StatusInternalServerError, "Failed to count encounters")
-        }
+		countQuery := `SELECT COUNT(*) FROM encounters WHERE my_id = $1 AND DATE(created_at) = $2`
+		if err := db.QueryRow(countQuery, userID, dateStr).Scan(&res.EncounterCount); err != nil {
+			return respondError(c, http.StatusInternalServerError, "Failed to count encounters")
+		}
 
-        eventQuery := `SELECT name FROM events WHERE DATE(start_at) = $1`
-        rows, err := db.Query(eventQuery, dateStr)
-        if err != nil {
-            return respondError(c, http.StatusInternalServerError, "Failed to query events")
-        }
-        defer rows.Close()
+		eventQuery := `SELECT name FROM events WHERE DATE(start_at) = $1`
+		rows, err := db.Query(eventQuery, dateStr)
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "Failed to query events")
+		}
+		defer rows.Close()
 
-        for rows.Next() {
-            var eventName string
-            if err := rows.Scan(&eventName); err != nil {
-                return respondError(c, http.StatusInternalServerError, "Failed to read event rows")
-            }
-            res.EventNames = append(res.EventNames, eventName)
-        }
+		for rows.Next() {
+			var eventName string
+			if err := rows.Scan(&eventName); err != nil {
+				return respondError(c, http.StatusInternalServerError, "Failed to read event rows")
+			}
+			res.EventNames = append(res.EventNames, eventName)
+		}
 
-        return c.JSON(http.StatusOK, res)
-    })
+		return c.JSON(http.StatusOK, res)
+	})
 
-    // 2. 【新規】正しい monthly API (1ヶ月分の人数を一括で返す)
-    // 理由: フロントエンドが「1ヶ月分のAPI」に切り替えて、カレンダーの描画を爆速化（サーバー負荷軽減）できるようにするため。タイポ(wncountters)も修正済み。
-    e.GET("/users/:id/calendar/monthly", func(c echo.Context) error {
-        userID := c.Param("id")
-        yearMonth := c.QueryParam("month")
-        if yearMonth == "" {
-            yearMonth = time.Now().Format("2006-01")
-        }
+	// 2. 【新規】正しい monthly API (1ヶ月分の人数を一括で返す)
+	// 理由: フロントエンドが「1ヶ月分のAPI」に切り替えて、カレンダーの描画を爆速化（サーバー負荷軽減）できるようにするため。タイポ(wncountters)も修正済み。
+	e.GET("/users/:id/calendar/monthly", func(c echo.Context) error {
+		userID := c.Param("id")
+		yearMonth := c.QueryParam("month")
+		if yearMonth == "" {
+			yearMonth = time.Now().Format("2006-01")
+		}
 
-        query := `
+		query := `
             SELECT DATE(created_at) as date, COUNT(*) as count
             FROM encounters
             WHERE my_id = $1 AND TO_CHAR(created_at, 'YYYY-MM') = $2
             GROUP BY DATE(created_at)
         `
-        rows, err := db.Query(query, userID, yearMonth)
-        if err != nil {
-            return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch monthly data"})
-        }
-        defer rows.Close()
+		rows, err := db.Query(query, userID, yearMonth)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch monthly data"})
+		}
+		defer rows.Close()
 
-        monthlyData := make(map[string]int)
-        for rows.Next() {
-            var date time.Time
-            var count int
-            if err := rows.Scan(&date, &count); err != nil {
-                return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to scan row"})
-            }
-            monthlyData[date.Format("2006-01-02")] = count
-        }
+		monthlyData := make(map[string]int)
+		for rows.Next() {
+			var date time.Time
+			var count int
+			if err := rows.Scan(&date, &count); err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to scan row"})
+			}
+			monthlyData[date.Format("2006-01-02")] = count
+		}
 
-        return c.JSON(http.StatusOK, monthlyData)
-    })
+		return c.JSON(http.StatusOK, monthlyData)
+	})
 
 	e.GET("/users/:id", func(c echo.Context) error {
 		id := c.Param("id")
