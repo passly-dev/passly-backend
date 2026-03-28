@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,6 +90,20 @@ func generateEphemeralToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+func getEncounterCooldownSeconds() int {
+	// ハッカソン検証中は短めにして、実機テストで件数変化を確認しやすくする
+	const defaultSeconds = 10
+	raw := strings.TrimSpace(os.Getenv("ENCOUNTER_COOLDOWN_SECONDS"))
+	if raw == "" {
+		return defaultSeconds
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed < 0 {
+		return defaultSeconds
+	}
+	return parsed
 }
 
 func GetConnpassEvents(c echo.Context) error {
@@ -179,6 +194,8 @@ func main() {
 	}
 
 	initDB(db)
+	encounterCooldownSeconds := getEncounterCooldownSeconds()
+	log.Printf("encounter cooldown seconds = %d", encounterCooldownSeconds)
 
 	e := echo.New()
 	e.Use(middleware.Logger())
@@ -241,19 +258,23 @@ func main() {
 		`
 		err := db.QueryRow(query, token).Scan(&resolvedUserID)
 		if err == nil {
+			log.Printf("resolve success token=%s user_id=%s", token, resolvedUserID)
 			return c.JSON(http.StatusOK, map[string]string{
 				"user_id": resolvedUserID,
 			})
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("resolve db error token=%s err=%v", token, err)
 			return respondError(c, http.StatusInternalServerError, "Failed to resolve token")
 		}
 
 		// 旧方式との後方互換: Base64デコードも許容
 		decoded, decodeErr := base64.StdEncoding.DecodeString(token)
 		if decodeErr != nil {
+			log.Printf("resolve invalid token=%s", token)
 			return respondError(c, http.StatusBadRequest, "Invalid token")
 		}
+		log.Printf("resolve fallback(base64) token=%s user_id=%s", token, string(decoded))
 
 		return c.JSON(http.StatusOK, map[string]string{
 			"user_id": string(decoded),
@@ -728,33 +749,42 @@ func main() {
 		if err := c.Bind(enc); err != nil {
 			return respondError(c, http.StatusBadRequest, "Invalid request format")
 		}
+		if enc.MyID == "" || enc.TargetID == "" {
+			return respondError(c, http.StatusBadRequest, "my_id and target_id are required")
+		}
 
-		// 理由: 5分以内の同一ユーザーの連続通信（DB負荷）を防ぐため
+		log.Printf("encounter request my_id=%s target_id=%s", enc.MyID, enc.TargetID)
+
+		// 直近クールダウン内の重複を抑制
 		var exists bool
 		checkQuery := `
 			SELECT EXISTS (
 				SELECT 1 FROM encounters 
 				WHERE my_id = $1 AND target_id = $2 
-				AND created_at > CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+				AND created_at > CURRENT_TIMESTAMP - ($3 * INTERVAL '1 second')
 			)
 		`
-		err := db.QueryRow(checkQuery, enc.MyID, enc.TargetID).Scan(&exists)
+		err := db.QueryRow(checkQuery, enc.MyID, enc.TargetID, encounterCooldownSeconds).Scan(&exists)
 		if err != nil {
+			log.Printf("encounter duplicate-check error my_id=%s target_id=%s err=%v", enc.MyID, enc.TargetID, err)
 			return respondError(c, http.StatusInternalServerError, "Database error during duplicate check")
 		}
 
-		// 理由: すでに直近ですれ違っている場合は、保存せず正常終了として返す
+		// 直近ですれ違っている場合は保存しない
 		if exists {
+			log.Printf("encounter skipped cooldown=%ds my_id=%s target_id=%s", encounterCooldownSeconds, enc.MyID, enc.TargetID)
 			return c.JSON(http.StatusOK, map[string]string{
-				"message": "Encounter skipped due to 5-minute cooldown",
+				"message": "Encounter skipped due to cooldown",
 			})
 		}
 
 		query := `INSERT INTO encounters (my_id, target_id, event_id) VALUES ($1, $2, $3) RETURNING id`
 		err = db.QueryRow(query, enc.MyID, enc.TargetID, enc.EventID).Scan(&enc.ID)
 		if err != nil {
+			log.Printf("encounter insert error my_id=%s target_id=%s err=%v", enc.MyID, enc.TargetID, err)
 			return respondError(c, http.StatusInternalServerError, "Failed to record encounter")
 		}
+		log.Printf("encounter recorded id=%d my_id=%s target_id=%s", enc.ID, enc.MyID, enc.TargetID)
 		return c.JSON(http.StatusCreated, enc)
 	})
 
