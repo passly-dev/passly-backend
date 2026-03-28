@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,6 +80,15 @@ func getFileExt(filename string) string {
 		return "." + parts[len(parts)-1]
 	}
 	return ".jpg"
+}
+
+func generateEphemeralToken() (string, error) {
+	// 8byteを16桁hex化。BLE広告名(SP_ + token)でも20文字以内に収まる。
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func GetConnpassEvents(c echo.Context) error {
@@ -174,13 +185,28 @@ func main() {
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
 
-	// --- フロント救済用：ダミーエフェメラルトークンAPI ---
-	// 理由: フロントエンドが要求するAPIエンドポイント(404エラーの原因)を最速で提供するため。
+	// --- エフェメラルトークンAPI ---
+	// BLE広告名20文字制限に合わせた短いトークンを返す。
 	e.GET("/users/:id/ephemeral-token", func(c echo.Context) error {
 		userID := c.Param("id")
-		// 理由: ユーザーIDをBase64エンコードし、暗号化された本物のトークンのように見せかけるため。
-		token := base64.StdEncoding.EncodeToString([]byte(userID))
-		expiresAt := time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339)
+		token, err := generateEphemeralToken()
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "failed to generate token")
+		}
+
+		expiresAtTime := time.Now().Add(1 * time.Hour).UTC()
+		expiresAt := expiresAtTime.Format(time.RFC3339)
+
+		upsertQuery := `
+			INSERT INTO ephemeral_tokens (token, user_id, expires_at)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (token)
+			DO UPDATE SET user_id = EXCLUDED.user_id, expires_at = EXCLUDED.expires_at, created_at = CURRENT_TIMESTAMP
+		`
+		if _, err := db.Exec(upsertQuery, token, userID, expiresAtTime); err != nil {
+			return respondError(c, http.StatusInternalServerError, "failed to store token")
+		}
+
 		return c.JSON(http.StatusOK, map[string]string{
 			"token":      token,
 			"expires_in": "3600",
@@ -203,11 +229,32 @@ func main() {
 		if token == "" {
 			return respondError(c, http.StatusBadRequest, "token or ephemeral_id is required")
 		}
-		// 理由: 送られてきたBase64文字列を元のユーザーIDに復号(デコード)して返すため。
-		decoded, err := base64.StdEncoding.DecodeString(token)
-		if err != nil {
+
+		// 新方式: DB保存済みの短いトークンを優先解決
+		var resolvedUserID string
+		query := `
+			SELECT user_id
+			FROM ephemeral_tokens
+			WHERE token = $1 AND expires_at > CURRENT_TIMESTAMP
+			ORDER BY created_at DESC
+			LIMIT 1
+		`
+		err := db.QueryRow(query, token).Scan(&resolvedUserID)
+		if err == nil {
+			return c.JSON(http.StatusOK, map[string]string{
+				"user_id": resolvedUserID,
+			})
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return respondError(c, http.StatusInternalServerError, "Failed to resolve token")
+		}
+
+		// 旧方式との後方互換: Base64デコードも許容
+		decoded, decodeErr := base64.StdEncoding.DecodeString(token)
+		if decodeErr != nil {
 			return respondError(c, http.StatusBadRequest, "Invalid token")
 		}
+
 		return c.JSON(http.StatusOK, map[string]string{
 			"user_id": string(decoded),
 		})
@@ -763,6 +810,14 @@ func initDB(db *sql.DB) {
             is_confirmed BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );`,
+		`CREATE TABLE IF NOT EXISTS ephemeral_tokens (
+			token VARCHAR(64) PRIMARY KEY,
+			user_id VARCHAR(50) REFERENCES users(id),
+			expires_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_ephemeral_tokens_user_id ON ephemeral_tokens(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_ephemeral_tokens_expires_at ON ephemeral_tokens(expires_at);`,
 	}
 	for _, q := range queries {
 		if _, err := db.Exec(q); err != nil {
