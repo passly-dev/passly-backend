@@ -547,9 +547,17 @@ func main() {
 			dateStr = time.Now().Format("2006-01-02")
 		}
 
+		type EncounterUser struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			IconURL string `json:"icon_url"`
+			OneWord string `json:"one_word"`
+		}
+
 		type DailyData struct {
-			EncounterCount int      `json:"encounter_count"`
-			EventNames     []string `json:"event_names"`
+			EncounterCount int             `json:"encounter_count"`
+			EventNames     []string        `json:"event_names"`
+			EncounterUsers []EncounterUser `json:"encounter_users"`
 		}
 		var res DailyData
 
@@ -571,6 +579,42 @@ func main() {
 				return respondError(c, http.StatusInternalServerError, "Failed to read event rows")
 			}
 			res.EventNames = append(res.EventNames, eventName)
+		}
+
+		usersQuery := `
+			SELECT id, name, icon_url, one_word
+			FROM (
+				SELECT DISTINCT ON (u.id)
+					u.id,
+					u.name,
+					COALESCE(u.icon_url, '') AS icon_url,
+					COALESCE(u.one_word, '') AS one_word,
+					e.created_at
+				FROM encounters e
+				JOIN users u ON u.id = CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END
+				WHERE (e.my_id = $1 OR e.target_id = $1)
+					AND DATE(e.created_at) = $2
+				ORDER BY u.id, e.created_at DESC
+			) latest
+			ORDER BY created_at DESC
+		`
+
+		userRows, err := db.Query(usersQuery, userID, dateStr)
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "Failed to query encounter users")
+		}
+		defer userRows.Close()
+
+		for userRows.Next() {
+			var user EncounterUser
+			if err := userRows.Scan(&user.ID, &user.Name, &user.IconURL, &user.OneWord); err != nil {
+				return respondError(c, http.StatusInternalServerError, "Failed to read encounter users")
+			}
+			res.EncounterUsers = append(res.EncounterUsers, user)
+		}
+
+		if err := userRows.Err(); err != nil {
+			return respondError(c, http.StatusInternalServerError, "Failed to iterate encounter users")
 		}
 
 		return c.JSON(http.StatusOK, res)
