@@ -931,6 +931,12 @@ func initDB(db *sql.DB) {
             is_confirmed BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );`,
+		`DELETE FROM encounters e
+		 USING encounters d
+		 WHERE e.id > d.id
+		   AND DATE(e.created_at) = DATE(d.created_at)
+		   AND LEAST(e.my_id, e.target_id) = LEAST(d.my_id, d.target_id)
+		   AND GREATEST(e.my_id, e.target_id) = GREATEST(d.my_id, d.target_id);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_encounters_pair_per_day
 			ON encounters (LEAST(my_id, target_id), GREATEST(my_id, target_id), (DATE(created_at)));`,
 		`CREATE TABLE IF NOT EXISTS ephemeral_tokens (
