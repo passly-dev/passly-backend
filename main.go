@@ -124,7 +124,7 @@ func resolveUserIDFromToken(db *sql.DB, token string) (string, error) {
 	if err == nil {
 		return resolvedUserID, nil
 	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("failed to resolve token from db: %w", err)
 	}
 
