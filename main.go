@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -43,15 +44,31 @@ type User struct {
 }
 
 type ConnpassResponse struct {
-	Events []ConnpassEvent `json:"events"`
+	ResultsReturned  int             `json:"results_returned"`
+	ResultsAvailable int             `json:"results_available"`
+	ResultsStart     int             `json:"results_start"`
+	Events           []ConnpassEvent `json:"events"`
 }
 
 type ConnpassEvent struct {
-	EventID   int    `json:"event_id"`
-	Title     string `json:"title"`
-	Place     string `json:"place"`
-	StartedAt string `json:"start_at"`
-	EndedAt   string `json:"end_at"`
+	EventID          int    `json:"event_id"`
+	Title            string `json:"title"`
+	Catch            string `json:"catch,omitempty"`
+	Description      string `json:"description,omitempty"`
+	EventURL         string `json:"event_url,omitempty"`
+	StartedAt        string `json:"started_at"`
+	EndedAt          string `json:"ended_at"`
+	Limit            int    `json:"limit,omitempty"`
+	HashTag          string `json:"hash_tag,omitempty"`
+	EventType        string `json:"event_type,omitempty"`
+	Accepted         int    `json:"accepted,omitempty"`
+	Waiting          int    `json:"waiting,omitempty"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
+	OwnerID          int    `json:"owner_id,omitempty"`
+	OwnerNickname    string `json:"owner_nickname,omitempty"`
+	OwnerDisplayName string `json:"owner_display_name,omitempty"`
+	Place            string `json:"place"`
+	Address          string `json:"address,omitempty"`
 }
 
 type Event struct {
@@ -137,56 +154,215 @@ func resolveUserIDFromToken(db *sql.DB, token string) (string, error) {
 	return string(decoded), nil
 }
 
-func GetConnpassEvents(c echo.Context) error {
-	url := "https://connpass.com/api/v1/event/?keyword=Go&count=5"
-	resp, err := http.Get(url)
-	var connpassData ConnpassResponse
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch events"})
-	}
-	defer resp.Body.Close()
-
-	err = json.NewDecoder(resp.Body).Decode(&connpassData)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to decode events"})
-	}
-
-	var frontendEvents []Event
-	for _, ce := range connpassData.Events {
-		startAt, _ := time.Parse(time.RFC3339, ce.StartedAt)
-		endAt, _ := time.Parse(time.RFC3339, ce.EndedAt)
-		frontendEvents = append(frontendEvents, Event{
-			ID:       ce.EventID,
-			Name:     ce.Title,
-			Location: ce.Place,
-			StartAt:  startAt,
-			EndAt:    endAt,
-		})
-	}
-	return c.JSON(http.StatusOK, frontendEvents)
+func isConnpassMockEnabled() bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv("CONNPASS_MOCK_MODE")))
+	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
 }
 
-func GetUserConnpassEvents(c echo.Context) error {
-	username := c.Param("username")
-
-	url := "https://connpass.com/api/v1/event/?owner_account=" + username
-	resp, err := http.Get(url)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch events"})
+func getConnpassMockFilePath() string {
+	path := strings.TrimSpace(os.Getenv("CONNPASS_MOCK_FILE"))
+	if path == "" {
+		return "mock/connpass_events.json"
 	}
-	defer resp.Body.Close()
+	return path
+}
 
-	var connpassData ConnpassResponse
-	err = json.NewDecoder(resp.Body).Decode(&connpassData)
+func shouldSeedConnpassMockOnStartup() bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv("CONNPASS_MOCK_SEED_ON_STARTUP")))
+	if raw == "" {
+		return true
+	}
+	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+}
+
+func seedConnpassMockEventsFromFile(db *sql.DB, filePath string) error {
+	body, err := os.ReadFile(filePath)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to decode events"})
+		return fmt.Errorf("read mock file failed: %w", err)
 	}
 
-	var frontendEvents []Event
-	for _, ce := range connpassData.Events {
-		startAt, _ := time.Parse(time.RFC3339, ce.StartedAt)
-		endAt, _ := time.Parse(time.RFC3339, ce.EndedAt)
-		frontendEvents = append(frontendEvents, Event{
+	var payload ConnpassResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return fmt.Errorf("parse mock file failed: %w", err)
+	}
+
+	if len(payload.Events) == 0 {
+		return errors.New("mock file has no events")
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx failed: %w", err)
+	}
+	defer tx.Rollback()
+
+	upsertQuery := `
+		INSERT INTO connpass_mock_events (
+			event_id, title, catch, description, event_url,
+			started_at, ended_at, limit_count, hash_tag, event_type,
+			accepted, waiting, source_updated_at,
+			owner_id, owner_nickname, owner_display_name,
+			place, address, is_active, updated_row_at
+		)
+		VALUES (
+			$1, $2, $3, $4, $5,
+			$6, $7, $8, $9, $10,
+			$11, $12, $13,
+			$14, $15, $16,
+			$17, $18, TRUE, CURRENT_TIMESTAMP
+		)
+		ON CONFLICT (event_id)
+		DO UPDATE SET
+			title = EXCLUDED.title,
+			catch = EXCLUDED.catch,
+			description = EXCLUDED.description,
+			event_url = EXCLUDED.event_url,
+			started_at = EXCLUDED.started_at,
+			ended_at = EXCLUDED.ended_at,
+			limit_count = EXCLUDED.limit_count,
+			hash_tag = EXCLUDED.hash_tag,
+			event_type = EXCLUDED.event_type,
+			accepted = EXCLUDED.accepted,
+			waiting = EXCLUDED.waiting,
+			source_updated_at = EXCLUDED.source_updated_at,
+			owner_id = EXCLUDED.owner_id,
+			owner_nickname = EXCLUDED.owner_nickname,
+			owner_display_name = EXCLUDED.owner_display_name,
+			place = EXCLUDED.place,
+			address = EXCLUDED.address,
+			is_active = TRUE,
+			updated_row_at = CURRENT_TIMESTAMP
+	`
+
+	seededCount := 0
+	for _, ce := range payload.Events {
+		startAt, err := time.Parse(time.RFC3339, ce.StartedAt)
+		if err != nil {
+			continue
+		}
+
+		var endedAt interface{}
+		if ce.EndedAt != "" {
+			parsedEndAt, err := time.Parse(time.RFC3339, ce.EndedAt)
+			if err == nil {
+				endedAt = parsedEndAt
+			}
+		}
+
+		var sourceUpdatedAt interface{}
+		if ce.UpdatedAt != "" {
+			parsedUpdatedAt, err := time.Parse(time.RFC3339, ce.UpdatedAt)
+			if err == nil {
+				sourceUpdatedAt = parsedUpdatedAt
+			}
+		}
+
+		if _, err := tx.Exec(
+			upsertQuery,
+			ce.EventID,
+			ce.Title,
+			ce.Catch,
+			ce.Description,
+			ce.EventURL,
+			startAt,
+			endedAt,
+			ce.Limit,
+			ce.HashTag,
+			ce.EventType,
+			ce.Accepted,
+			ce.Waiting,
+			sourceUpdatedAt,
+			ce.OwnerID,
+			ce.OwnerNickname,
+			ce.OwnerDisplayName,
+			ce.Place,
+			ce.Address,
+		); err != nil {
+			return fmt.Errorf("upsert mock event failed (event_id=%d): %w", ce.EventID, err)
+		}
+		seededCount++
+	}
+
+	if seededCount == 0 {
+		return errors.New("no valid events to seed")
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx failed: %w", err)
+	}
+
+	return nil
+}
+
+func loadMockEventsFromDB(db *sql.DB, owner string) ([]Event, error) {
+	if db == nil {
+		return nil, errors.New("db is nil")
+	}
+
+	normalizedOwner := strings.ToLower(strings.TrimSpace(owner))
+	query := `
+		SELECT event_id, title, place, started_at, ended_at
+		FROM connpass_mock_events
+		WHERE is_active = TRUE
+		  AND ($1 = '' OR LOWER(owner_nickname) = $1)
+		ORDER BY started_at ASC
+		LIMIT 100
+	`
+
+	rows, err := db.Query(query, normalizedOwner)
+	if err != nil {
+		return nil, fmt.Errorf("query mock events db failed: %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]Event, 0)
+	for rows.Next() {
+		var event Event
+		var endedAt sql.NullTime
+		if err := rows.Scan(&event.ID, &event.Name, &event.Location, &event.StartAt, &endedAt); err != nil {
+			return nil, fmt.Errorf("scan mock event db failed: %w", err)
+		}
+		if endedAt.Valid {
+			event.EndAt = endedAt.Time
+		} else {
+			event.EndAt = event.StartAt.Add(2 * time.Hour)
+		}
+		events = append(events, event)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate mock event db failed: %w", err)
+	}
+
+	if len(events) == 0 {
+		return nil, errors.New("no db mock events")
+	}
+
+	return events, nil
+}
+
+func convertConnpassEvents(connpassEvents []ConnpassEvent, owner string) ([]Event, error) {
+	normalizedOwner := strings.ToLower(strings.TrimSpace(owner))
+	events := make([]Event, 0, len(connpassEvents))
+
+	for _, ce := range connpassEvents {
+		if normalizedOwner != "" {
+			if strings.ToLower(strings.TrimSpace(ce.OwnerNickname)) != normalizedOwner {
+				continue
+			}
+		}
+
+		startAt, err := time.Parse(time.RFC3339, ce.StartedAt)
+		if err != nil {
+			continue
+		}
+
+		endAt, err := time.Parse(time.RFC3339, ce.EndedAt)
+		if err != nil {
+			endAt = startAt.Add(2 * time.Hour)
+		}
+
+		events = append(events, Event{
 			ID:       ce.EventID,
 			Name:     ce.Title,
 			Location: ce.Place,
@@ -194,7 +370,132 @@ func GetUserConnpassEvents(c echo.Context) error {
 			EndAt:    endAt,
 		})
 	}
-	return c.JSON(http.StatusOK, frontendEvents)
+
+	if len(events) == 0 {
+		return nil, errors.New("no connpass events parsed")
+	}
+
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].StartAt.Before(events[j].StartAt)
+	})
+
+	return events, nil
+}
+
+func loadMockEventsFromFile(owner string) ([]Event, error) {
+	filePath := getConnpassMockFilePath()
+	body, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("read mock file failed: %w", err)
+	}
+
+	var payload ConnpassResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("parse mock file failed: %w", err)
+	}
+
+	return convertConnpassEvents(payload.Events, owner)
+}
+
+func buildMockEvents(db *sql.DB, owner string) []Event {
+	events, err := loadMockEventsFromDB(db, owner)
+	if err == nil {
+		return events
+	}
+	log.Printf("failed to load connpass mock events from db, fallback to file: %v", err)
+
+	events, err = loadMockEventsFromFile(owner)
+	if err == nil {
+		return events
+	}
+	log.Printf("failed to load connpass mock file, fallback to generated mock events: %v", err)
+
+	now := time.Now()
+	label := "Community"
+	if strings.TrimSpace(owner) != "" {
+		label = owner
+	}
+
+	return []Event{
+		{
+			ID:       90001,
+			Name:     fmt.Sprintf("%s Go Meetup (Mock)", label),
+			Location: "東京都渋谷区 渋谷ヒカリエ",
+			StartAt:  now.AddDate(0, 0, 7),
+			EndAt:    now.AddDate(0, 0, 7).Add(2 * time.Hour),
+		},
+		{
+			ID:       90002,
+			Name:     fmt.Sprintf("%s Flutter LT Night (Mock)", label),
+			Location: "大阪府大阪市 グランフロント大阪",
+			StartAt:  now.AddDate(0, 0, 14),
+			EndAt:    now.AddDate(0, 0, 14).Add(2 * time.Hour),
+		},
+		{
+			ID:       90003,
+			Name:     fmt.Sprintf("%s Hack Session (Mock)", label),
+			Location: "オンライン",
+			StartAt:  now.AddDate(0, 0, 21),
+			EndAt:    now.AddDate(0, 0, 21).Add(3 * time.Hour),
+		},
+	}
+}
+
+func fetchConnpassEvents(url string) ([]Event, error) {
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("connpass status: %d", resp.StatusCode)
+	}
+
+	var connpassData ConnpassResponse
+	if err := json.NewDecoder(resp.Body).Decode(&connpassData); err != nil {
+		return nil, err
+	}
+
+	return convertConnpassEvents(connpassData.Events, "")
+}
+
+func GetConnpassEvents(db *sql.DB) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		// connpass API申請待ち/障害時でも開発を止めないため、モック返却を可能にする。
+		if isConnpassMockEnabled() {
+			return c.JSON(http.StatusOK, buildMockEvents(db, ""))
+		}
+
+		url := "https://connpass.com/api/v1/event/?keyword=Go&count=5"
+		events, err := fetchConnpassEvents(url)
+		if err != nil {
+			log.Printf("connpass fetch failed, fallback to mock events: %v", err)
+			return c.JSON(http.StatusOK, buildMockEvents(db, ""))
+		}
+
+		return c.JSON(http.StatusOK, events)
+	}
+}
+
+func GetUserConnpassEvents(db *sql.DB) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		username := c.Param("username")
+		// owner別APIも同様に、外部依存失敗時はユーザー名付きモックへフォールバックする。
+		if isConnpassMockEnabled() {
+			return c.JSON(http.StatusOK, buildMockEvents(db, username))
+		}
+
+		url := "https://connpass.com/api/v1/event/?owner_account=" + username
+		events, err := fetchConnpassEvents(url)
+		if err != nil {
+			log.Printf("connpass user fetch failed (user=%s), fallback to mock events: %v", username, err)
+			return c.JSON(http.StatusOK, buildMockEvents(db, username))
+		}
+
+		return c.JSON(http.StatusOK, events)
+	}
 }
 
 func main() {
@@ -225,6 +526,13 @@ func main() {
 	}
 
 	initDB(db)
+	if shouldSeedConnpassMockOnStartup() {
+		if err := seedConnpassMockEventsFromFile(db, getConnpassMockFilePath()); err != nil {
+			log.Printf("connpass mock seed skipped: %v", err)
+		} else {
+			log.Printf("connpass mock seed completed from %s", getConnpassMockFilePath())
+		}
+	}
 	encounterCooldownSeconds := getEncounterCooldownSeconds()
 	log.Printf("encounter cooldown seconds = %d", encounterCooldownSeconds)
 
@@ -291,8 +599,8 @@ func main() {
 	})
 
 	// --- イベント取得API ---
-	e.GET("/events", GetConnpassEvents)
-	e.GET("/users/:username/events", GetUserConnpassEvents)
+	e.GET("/events", GetConnpassEvents(db))
+	e.GET("/users/:username/events", GetUserConnpassEvents(db))
 
 	e.POST("/signup", func(c echo.Context) error {
 		var u User
@@ -1298,6 +1606,31 @@ func initDB(db *sql.DB) {
             end_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );`,
+		`CREATE TABLE IF NOT EXISTS connpass_mock_events (
+			event_id INTEGER PRIMARY KEY,
+			title TEXT NOT NULL,
+			catch TEXT,
+			description TEXT,
+			event_url TEXT,
+			started_at TIMESTAMPTZ NOT NULL,
+			ended_at TIMESTAMPTZ,
+			limit_count INTEGER,
+			hash_tag TEXT,
+			event_type TEXT,
+			accepted INTEGER,
+			waiting INTEGER,
+			source_updated_at TIMESTAMPTZ,
+			owner_id INTEGER,
+			owner_nickname TEXT,
+			owner_display_name TEXT,
+			place TEXT,
+			address TEXT,
+			is_active BOOLEAN NOT NULL DEFAULT TRUE,
+			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+			updated_row_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_connpass_mock_events_owner_started_at
+			ON connpass_mock_events (owner_nickname, started_at);`,
 		`CREATE TABLE IF NOT EXISTS event_participants (
             id SERIAL PRIMARY KEY,
             event_id INTEGER REFERENCES events(id),
