@@ -77,6 +77,10 @@ type Event struct {
 	Location string    `json:"location"`
 	StartAt  time.Time `json:"start_at"`
 	EndAt    time.Time `json:"end_at"`
+	Count    int       `json:"count"`
+	Accepted int       `json:"accepted"`
+	Waiting  int       `json:"waiting"`
+	Limit    int       `json:"limit"`
 }
 
 type Encounter struct {
@@ -301,7 +305,7 @@ func loadMockEventsFromDB(db *sql.DB, owner string) ([]Event, error) {
 
 	normalizedOwner := strings.ToLower(strings.TrimSpace(owner))
 	query := `
-		SELECT event_id, title, place, started_at, ended_at
+		SELECT event_id, title, place, started_at, ended_at, accepted, waiting, limit_count
 		FROM connpass_mock_events
 		WHERE is_active = TRUE
 		  AND ($1 = '' OR LOWER(owner_nickname) = $1)
@@ -319,13 +323,26 @@ func loadMockEventsFromDB(db *sql.DB, owner string) ([]Event, error) {
 	for rows.Next() {
 		var event Event
 		var endedAt sql.NullTime
-		if err := rows.Scan(&event.ID, &event.Name, &event.Location, &event.StartAt, &endedAt); err != nil {
+		var accepted sql.NullInt64
+		var waiting sql.NullInt64
+		var limit sql.NullInt64
+		if err := rows.Scan(&event.ID, &event.Name, &event.Location, &event.StartAt, &endedAt, &accepted, &waiting, &limit); err != nil {
 			return nil, fmt.Errorf("scan mock event db failed: %w", err)
 		}
 		if endedAt.Valid {
 			event.EndAt = endedAt.Time
 		} else {
 			event.EndAt = event.StartAt.Add(2 * time.Hour)
+		}
+		if accepted.Valid {
+			event.Count = int(accepted.Int64)
+			event.Accepted = int(accepted.Int64)
+		}
+		if waiting.Valid {
+			event.Waiting = int(waiting.Int64)
+		}
+		if limit.Valid {
+			event.Limit = int(limit.Int64)
 		}
 		events = append(events, event)
 	}
@@ -368,6 +385,10 @@ func convertConnpassEvents(connpassEvents []ConnpassEvent, owner string) ([]Even
 			Location: ce.Place,
 			StartAt:  startAt,
 			EndAt:    endAt,
+			Count:    ce.Accepted,
+			Accepted: ce.Accepted,
+			Waiting:  ce.Waiting,
+			Limit:    ce.Limit,
 		})
 	}
 
@@ -423,6 +444,10 @@ func buildMockEvents(db *sql.DB, owner string) []Event {
 			Location: "東京都渋谷区 渋谷ヒカリエ",
 			StartAt:  now.AddDate(0, 0, 7),
 			EndAt:    now.AddDate(0, 0, 7).Add(2 * time.Hour),
+			Count:    12,
+			Accepted: 12,
+			Waiting:  1,
+			Limit:    20,
 		},
 		{
 			ID:       90002,
@@ -430,6 +455,10 @@ func buildMockEvents(db *sql.DB, owner string) []Event {
 			Location: "大阪府大阪市 グランフロント大阪",
 			StartAt:  now.AddDate(0, 0, 14),
 			EndAt:    now.AddDate(0, 0, 14).Add(2 * time.Hour),
+			Count:    18,
+			Accepted: 18,
+			Waiting:  2,
+			Limit:    30,
 		},
 		{
 			ID:       90003,
@@ -437,6 +466,10 @@ func buildMockEvents(db *sql.DB, owner string) []Event {
 			Location: "オンライン",
 			StartAt:  now.AddDate(0, 0, 21),
 			EndAt:    now.AddDate(0, 0, 21).Add(3 * time.Hour),
+			Count:    24,
+			Accepted: 24,
+			Waiting:  0,
+			Limit:    40,
 		},
 	}
 }
