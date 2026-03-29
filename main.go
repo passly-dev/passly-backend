@@ -380,10 +380,19 @@ func main() {
 		}
 		var res HomeData
 
-		if err := db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE my_id = $1 OR target_id = $1`, userID).Scan(&res.TotalEncounters); err != nil {
+		if err := db.QueryRow(`
+			SELECT COUNT(DISTINCT CASE WHEN my_id = $1 THEN target_id ELSE my_id END)
+			FROM encounters
+			WHERE my_id = $1 OR target_id = $1
+		`, userID).Scan(&res.TotalEncounters); err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to count total encounters")
 		}
-		if err := db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE (my_id = $1 OR target_id = $1) AND DATE(created_at) = CURRENT_DATE`, userID).Scan(&res.TodayEncounters); err != nil {
+		if err := db.QueryRow(`
+			SELECT COUNT(DISTINCT CASE WHEN my_id = $1 THEN target_id ELSE my_id END)
+			FROM encounters
+			WHERE (my_id = $1 OR target_id = $1)
+			  AND DATE(created_at) = CURRENT_DATE
+		`, userID).Scan(&res.TodayEncounters); err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to count today encounters")
 		}
 
