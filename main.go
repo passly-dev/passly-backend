@@ -862,6 +862,12 @@ func main() {
 		query := `INSERT INTO encounters (my_id, target_id, event_id) VALUES ($1, $2, $3) RETURNING id`
 		err = db.QueryRow(query, enc.MyID, enc.TargetID, enc.EventID).Scan(&enc.ID)
 		if err != nil {
+			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+				log.Printf("encounter skipped by unique index my_id=%s target_id=%s", enc.MyID, enc.TargetID)
+				return c.JSON(http.StatusOK, map[string]string{
+					"message": "Encounter skipped because this pair already met today",
+				})
+			}
 			log.Printf("encounter insert error my_id=%s target_id=%s err=%v", enc.MyID, enc.TargetID, err)
 			return respondError(c, http.StatusInternalServerError, "Failed to record encounter")
 		}
@@ -925,6 +931,8 @@ func initDB(db *sql.DB) {
             is_confirmed BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_encounters_pair_per_day
+			ON encounters (LEAST(my_id, target_id), GREATEST(my_id, target_id), (DATE(created_at)));`,
 		`CREATE TABLE IF NOT EXISTS ephemeral_tokens (
 			token VARCHAR(64) PRIMARY KEY,
 			user_id VARCHAR(50) REFERENCES users(id),
