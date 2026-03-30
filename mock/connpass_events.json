@@ -8,9 +8,9 @@
       "title": "SysHack2026 Kickoff",
       "catch": "キックオフイベント",
       "description": "API申請中の仮データです",
-      "event_url": "https://connpass.com/event/90001/",
-      "started_at": "2026-04-05T10:00:00+09:00",
-      "ended_at": "2026-04-05T18:00:00+09:00",
+      "event_url": "https://connpass.com/event/0/",
+      "started_at": "2026-03-17T10:00:00+09:00",
+      "ended_at": "2026-03-17T18:00:00+09:00",
       "limit": 80,
       "hash_tag": "syshack",
       "event_type": "participation",
@@ -20,7 +20,7 @@
       "owner_id": 1001,
       "owner_nickname": "syshack",
       "owner_display_name": "SysHack Team",
-      "place": "東京都渋谷区 渋谷ヒカリエ",
+      "place": "愛知県豊田市 愛知工業大学",
       "address": ""
     },
     {
@@ -28,7 +28,7 @@
       "title": "Flutter LT Night",
       "catch": "FlutterのLT会",
       "description": "API申請中の仮データです",
-      "event_url": "https://connpass.com/event/90002/",
+      "event_url": "https://connpass.com/event/0/",
       "started_at": "2026-04-12T19:00:00+09:00",
       "ended_at": "2026-04-12T21:00:00+09:00",
       "limit": 60,
@@ -40,7 +40,7 @@
       "owner_id": 1002,
       "owner_nickname": "flutter_kansai",
       "owner_display_name": "Flutter Kansai",
-      "place": "大阪府大阪市 グランフロント大阪",
+      "place": "愛知県豊田市 愛知工業大学",
       "address": ""
     },
     {
@@ -48,7 +48,7 @@
       "title": "Go Backend Meetup",
       "catch": "Goバックエンド勉強会",
       "description": "API申請中の仮データです",
-      "event_url": "https://connpass.com/event/90003/",
+      "event_url": "https://connpass.com/event/0/",
       "started_at": "2026-04-19T13:00:00+09:00",
       "ended_at": "2026-04-19T16:00:00+09:00",
       "limit": 50,
@@ -60,7 +60,7 @@
       "owner_id": 1003,
       "owner_nickname": "go_community",
       "owner_display_name": "Go Community",
-      "place": "福岡県福岡市 アクロス福岡",
+      "place": "愛知県豊田市 愛知工業大学",
       "address": ""
     },
     {
@@ -68,7 +68,7 @@
       "title": "AI Hack Session",
       "catch": "オンライン開発会",
       "description": "API申請中の仮データです",
-      "event_url": "https://connpass.com/event/90004/",
+      "event_url": "https://connpass.com/event/0/",
       "started_at": "2026-04-26T20:00:00+09:00",
       "ended_at": "2026-04-26T22:00:00+09:00",
       "limit": 100,
@@ -80,17 +80,17 @@
       "owner_id": 1001,
       "owner_nickname": "syshack",
       "owner_display_name": "SysHack Team",
-      "place": "オンライン",
+      "place": "愛知県豊田市 愛知工業大学",
       "address": ""
     },
     {
       "event_id": 90005,
-      "title": "Matsuriba MAX Pre Event",
-      "catch": "事前交流イベント",
+      "title": "Matsuriba MAX   ",
+      "catch": "交流イベント",
       "description": "API申請中の仮データです",
-      "event_url": "https://connpass.com/event/90005/",
-      "started_at": "2026-05-03T14:00:00+09:00",
-      "ended_at": "2026-05-03T17:00:00+09:00",
+      "event_url": "https://connpass.com/event/0/",
+      "started_at": "2026-03-08T14:00:00+09:00",
+      "ended_at": "2026-03-08T17:00:00+09:00",
       "limit": 120,
       "hash_tag": "matsuriba",
       "event_type": "participation",
@@ -100,7 +100,7 @@
       "owner_id": 1004,
       "owner_nickname": "matsuriba",
       "owner_display_name": "Matsuriba",
-      "place": "東京都千代田区 秋葉原UDX",
+      "place": "愛知県名古屋市 吹上ホール",
       "address": ""
     }
   ]
