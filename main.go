@@ -75,6 +75,7 @@ type Event struct {
 	ID       int       `json:"id"`
 	Name     string    `json:"name"`
 	Location string    `json:"location"`
+	EventURL string    `json:"event_url"`
 	StartAt  time.Time `json:"start_at"`
 	EndAt    time.Time `json:"end_at"`
 	Count    int       `json:"count"`
@@ -305,7 +306,7 @@ func loadMockEventsFromDB(db *sql.DB, owner string) ([]Event, error) {
 
 	normalizedOwner := strings.ToLower(strings.TrimSpace(owner))
 	query := `
-		SELECT event_id, title, place, started_at, ended_at, accepted, waiting, limit_count
+		SELECT event_id, title, place, event_url, started_at, ended_at, accepted, waiting, limit_count
 		FROM connpass_mock_events
 		WHERE is_active = TRUE
 		  AND ($1 = '' OR LOWER(owner_nickname) = $1)
@@ -322,12 +323,16 @@ func loadMockEventsFromDB(db *sql.DB, owner string) ([]Event, error) {
 	events := make([]Event, 0)
 	for rows.Next() {
 		var event Event
+		var eventURL sql.NullString
 		var endedAt sql.NullTime
 		var accepted sql.NullInt64
 		var waiting sql.NullInt64
 		var limit sql.NullInt64
-		if err := rows.Scan(&event.ID, &event.Name, &event.Location, &event.StartAt, &endedAt, &accepted, &waiting, &limit); err != nil {
+		if err := rows.Scan(&event.ID, &event.Name, &event.Location, &eventURL, &event.StartAt, &endedAt, &accepted, &waiting, &limit); err != nil {
 			return nil, fmt.Errorf("scan mock event db failed: %w", err)
+		}
+		if eventURL.Valid {
+			event.EventURL = eventURL.String
 		}
 		if endedAt.Valid {
 			event.EndAt = endedAt.Time
@@ -383,6 +388,7 @@ func convertConnpassEvents(connpassEvents []ConnpassEvent, owner string) ([]Even
 			ID:       ce.EventID,
 			Name:     ce.Title,
 			Location: ce.Place,
+			EventURL: ce.EventURL,
 			StartAt:  startAt,
 			EndAt:    endAt,
 			Count:    ce.Accepted,
@@ -442,6 +448,7 @@ func buildMockEvents(db *sql.DB, owner string) []Event {
 			ID:       90001,
 			Name:     fmt.Sprintf("%s Go Meetup (Mock)", label),
 			Location: "東京都渋谷区 渋谷ヒカリエ",
+			EventURL: "",
 			StartAt:  now.AddDate(0, 0, 7),
 			EndAt:    now.AddDate(0, 0, 7).Add(2 * time.Hour),
 			Count:    12,
@@ -453,6 +460,7 @@ func buildMockEvents(db *sql.DB, owner string) []Event {
 			ID:       90002,
 			Name:     fmt.Sprintf("%s Flutter LT Night (Mock)", label),
 			Location: "大阪府大阪市 グランフロント大阪",
+			EventURL: "",
 			StartAt:  now.AddDate(0, 0, 14),
 			EndAt:    now.AddDate(0, 0, 14).Add(2 * time.Hour),
 			Count:    18,
@@ -464,6 +472,7 @@ func buildMockEvents(db *sql.DB, owner string) []Event {
 			ID:       90003,
 			Name:     fmt.Sprintf("%s Hack Session (Mock)", label),
 			Location: "オンライン",
+			EventURL: "",
 			StartAt:  now.AddDate(0, 0, 21),
 			EndAt:    now.AddDate(0, 0, 21).Add(3 * time.Hour),
 			Count:    24,
