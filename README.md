@@ -1,4 +1,4 @@
-# すれ違い通信バックエンド (Streetpass Backend)
+# すれ違い通信バックエンド (passly Backend)
 
 ## 概要
 すれ違い通信を実現するためのバックエンドAPIサーバー。
@@ -7,7 +7,7 @@
 ## 技術スタック
 - 言語: Go 1.26.0
 - フレームワーク: Echo v4
-- データベース: PostgreSQL 16
+- データベース: PostgreSQL 18
 - インフラ: Render (Web Service & PostgreSQL)
 - ローカル環境: Docker (Docker Compose)
 

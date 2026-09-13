@@ -545,7 +545,7 @@ func main() {
 
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "host=localhost port=5432 user=user password=pass dbname=streetpass sslmode=disable"
+		dbURL = "host=localhost port=5432 user=user password=pass dbname=passly sslmode=disable"
 	}
 
 	db, err := sql.Open("postgres", dbURL)
@@ -1088,82 +1088,6 @@ func main() {
 		})
 	})
 
-	// unread 取得API
-	// 理由:
-	// - フロントのローカルフラグはOSキルで消える可能性があるため、サーバー側の is_read で安全に未読管理する。
-	// - 取得と既読更新を同一トランザクションで行い、次回起動時の重複通知を防ぐ。
-	e.GET("/users/:id/encounters/unread", func(c echo.Context) error {
-		userID := c.Param("id")
-
-		type UnreadEncounter struct {
-			TargetID        string    `json:"target_id"`
-			Name            string    `json:"name"`
-			IconURL         string    `json:"icon_url"`
-			OneWord         string    `json:"one_word"`
-			LastEncounterAt time.Time `json:"last_encounter_at"`
-		}
-
-		tx, err := db.BeginTx(c.Request().Context(), &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-		if err != nil {
-			return respondError(c, http.StatusInternalServerError, "Failed to start transaction")
-		}
-		defer tx.Rollback()
-
-		// 1) is_read = false の未読行から target_id ごとに最新1件を取得する。
-		//    理由: 同一ユーザーと複数回すれ違っていても通知は1件で十分なため。
-		rows, err := tx.Query(`
-				SELECT DISTINCT ON (e.target_id)
-					e.target_id,
-					u.name,
-					COALESCE(u.icon_url, '') AS icon_url,
-					COALESCE(u.one_word, '') AS one_word,
-					e.created_at
-				FROM encounters e
-				JOIN users u ON u.id = e.target_id
-				WHERE e.my_id = $1
-				  AND e.is_read = FALSE
-				ORDER BY e.target_id, e.created_at DESC
-			`, userID)
-		if err != nil {
-			return respondError(c, http.StatusInternalServerError, "Failed to query unread encounters")
-		}
-		defer rows.Close()
-
-		result := make([]UnreadEncounter, 0)
-		targetIDs := make([]string, 0)
-		for rows.Next() {
-			var item UnreadEncounter
-			if err := rows.Scan(&item.TargetID, &item.Name, &item.IconURL, &item.OneWord, &item.LastEncounterAt); err != nil {
-				return respondError(c, http.StatusInternalServerError, "Failed to scan unread encounter")
-			}
-			result = append(result, item)
-			targetIDs = append(targetIDs, item.TargetID)
-		}
-		if err := rows.Err(); err != nil {
-			return respondError(c, http.StatusInternalServerError, "Failed to iterate unread encounters")
-		}
-
-		if len(targetIDs) > 0 {
-			// 2) 返却対象の target_id に紐づく未読行をまとめて既読化する。
-			//    理由: 次回起動時に同じ相手が再び新着扱いにならないようにするため。
-			if _, err := tx.Exec(`
-					UPDATE encounters
-					SET is_read = TRUE
-					WHERE my_id = $1
-					  AND is_read = FALSE
-					  AND target_id = ANY($2)
-				`, userID, pq.Array(targetIDs)); err != nil {
-				return respondError(c, http.StatusInternalServerError, "Failed to mark unread encounters as read")
-			}
-		}
-
-		if err := tx.Commit(); err != nil {
-			return respondError(c, http.StatusInternalServerError, "Failed to commit transaction")
-		}
-
-		return c.JSON(http.StatusOK, result)
-	})
-
 	e.GET("/users/:id/encounters", func(c echo.Context) error {
 		userID := c.Param("id")
 
@@ -1435,6 +1359,59 @@ func main() {
 		})
 	})
 
+	e.DELETE("/users/:id", func(c echo.Context) error {
+		userID := c.Param("id")
+
+		tx, err := db.Begin()
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "Failed to start transaction")
+		}
+		defer tx.Rollback()
+
+		// users への外部キーを持つ関連テーブルを先に削除する（ON DELETE CASCADE 未設定のため）。
+		if _, err := tx.Exec(`DELETE FROM ephemeral_tokens WHERE user_id = $1`, userID); err != nil {
+			log.Printf("Failed to delete ephemeral_tokens for user %s: %v", userID, err)
+			return respondError(c, http.StatusInternalServerError, "Failed to delete user")
+		}
+
+		if _, err := tx.Exec(`DELETE FROM event_participants WHERE user_id = $1`, userID); err != nil {
+			log.Printf("Failed to delete event_participants for user %s: %v", userID, err)
+			return respondError(c, http.StatusInternalServerError, "Failed to delete user")
+		}
+
+		// 退会ユーザーが関わるすれ違い記録は相手側の履歴からも完全に削除する（決定済み仕様）。
+		if _, err := tx.Exec(`DELETE FROM encounters WHERE my_id = $1 OR target_id = $1`, userID); err != nil {
+			log.Printf("Failed to delete encounters for user %s: %v", userID, err)
+			return respondError(c, http.StatusInternalServerError, "Failed to delete user")
+		}
+
+		result, err := tx.Exec(`DELETE FROM users WHERE id = $1`, userID)
+		if err != nil {
+			log.Printf("Failed to delete user %s: %v", userID, err)
+			return respondError(c, http.StatusInternalServerError, "Failed to delete user")
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			log.Printf("Failed to read rows affected for user %s deletion: %v", userID, err)
+			return respondError(c, http.StatusInternalServerError, "Failed to delete user")
+		}
+		if rowsAffected == 0 {
+			return respondError(c, http.StatusNotFound, "User not found")
+		}
+
+		if err := tx.Commit(); err != nil {
+			log.Printf("Failed to commit user deletion for %s: %v", userID, err)
+			return respondError(c, http.StatusInternalServerError, "Failed to delete user")
+		}
+
+		// アバター画像の削除はベストエフォート。失敗してもアカウント削除自体は成功として扱う。
+		if err := cleanupOldAvatars(c.Request().Context(), userID); err != nil {
+			log.Printf("Failed to cleanup avatar files for user %s: %v", userID, err)
+		}
+
+		return c.JSON(http.StatusOK, map[string]string{"message": "User deleted"})
+	})
+
 	e.POST("/users/:id/avatar", func(c echo.Context) error {
 		userID := c.Param("id")
 
@@ -1607,7 +1584,7 @@ func main() {
 	})
 
 	e.GET("/", func(c echo.Context) error {
-		return c.String(http.StatusOK, "StreetPass API Server is running!")
+		return c.String(http.StatusOK, "passly API Server is running!")
 	})
 	e.HEAD("/", func(c echo.Context) error {
 		return c.NoContent(http.StatusOK)
@@ -1687,11 +1664,6 @@ func initDB(db *sql.DB) {
             is_confirmed BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );`,
-		// 理由: OSキルでローカル状態が消えても未読管理を壊さないため、既読状態をDBで保持する。
-		`ALTER TABLE encounters ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT FALSE;`,
-		// 理由: my_id + is_read で頻繁に検索するため、未読取得の性能を安定化する。
-		`CREATE INDEX IF NOT EXISTS idx_encounters_my_id_is_read_created_at
-			ON encounters (my_id, is_read, created_at DESC);`,
 		`DELETE FROM encounters e
 		 USING encounters d
 		 WHERE e.id > d.id
