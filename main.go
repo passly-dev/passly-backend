@@ -558,9 +558,10 @@ func main() {
 	defer cancel()
 
 	firebaseServiceAccount := os.Getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+	firebaseServiceAccountJSON := os.Getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
 	firebaseBucket := os.Getenv("FIREBASE_STORAGE_BUCKET")
-	if firebaseServiceAccount == "" {
-		log.Println("FIREBASE_SERVICE_ACCOUNT_PATH not set - avatar upload disabled")
+	if firebaseServiceAccount == "" && firebaseServiceAccountJSON == "" {
+		log.Println("FIREBASE_SERVICE_ACCOUNT_PATH/FIREBASE_SERVICE_ACCOUNT_JSON not set - avatar upload disabled")
 	} else if err := InitFirebase(ctx, firebaseServiceAccount, firebaseBucket); err != nil {
 		log.Printf("Firebase init error: %v (continuing without upload)\n", err)
 	} else {
