@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -150,13 +149,7 @@ func resolveUserIDFromToken(db *sql.DB, token string) (string, error) {
 		return "", fmt.Errorf("failed to resolve token from db: %w", err)
 	}
 
-	// 旧方式との後方互換: Base64デコードも許容
-	decoded, decodeErr := base64.StdEncoding.DecodeString(token)
-	if decodeErr != nil {
-		return "", errors.New("invalid token")
-	}
-
-	return string(decoded), nil
+	return "", errors.New("invalid or expired token")
 }
 
 func isConnpassMockEnabled() bool {
