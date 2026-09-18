@@ -724,8 +724,11 @@ func main() {
 
 	// --- エフェメラルトークンAPI ---
 	// BLE広告名20文字制限に合わせた短いトークンを返す。
-	e.GET("/users/:id/ephemeral-token", func(c echo.Context) error {
+	e.GET("/users/:id/ephemeral-token", jwtRequired(db, func(c echo.Context) error {
 		userID := c.Param("id")
+		if err := requireSelf(c, userID); err != nil {
+			return err
+		}
 		token, err := generateEphemeralToken()
 		if err != nil {
 			return respondError(c, http.StatusInternalServerError, "failed to generate token")
@@ -749,7 +752,7 @@ func main() {
 			"expires_in": "3600",
 			"expires_at": expiresAt,
 		})
-	})
+	}))
 
 	// オフライン用トークン事前配布API(2026-09-18追加)。
 	// オフライン中はサーバーに5分おきの再取得ができないため、これから先の時間帯に
@@ -1464,8 +1467,11 @@ func main() {
 
 	// 親しい友達（close friends）
 	// フロント: lib/features/close_friend/data/close_friend_repository_api.dart が前提とするAPI。
-	e.POST("/users/:id/close-friends", func(c echo.Context) error {
+	e.POST("/users/:id/close-friends", jwtRequired(db, func(c echo.Context) error {
 		userID := c.Param("id")
+		if err := requireSelf(c, userID); err != nil {
+			return err
+		}
 
 		var body struct {
 			TargetID string `json:"target_id"`
@@ -1491,10 +1497,13 @@ func main() {
 			return respondError(c, http.StatusInternalServerError, "Failed to add close friend")
 		}
 		return c.JSON(http.StatusOK, map[string]string{"message": "Close friend added"})
-	})
+	}))
 
-	e.DELETE("/users/:id/close-friends/:target_id", func(c echo.Context) error {
+	e.DELETE("/users/:id/close-friends/:target_id", jwtRequired(db, func(c echo.Context) error {
 		userID := c.Param("id")
+		if err := requireSelf(c, userID); err != nil {
+			return err
+		}
 		targetID := c.Param("target_id")
 
 		_, err := db.Exec(`DELETE FROM close_friends WHERE user_id = $1 AND friend_id = $2`, userID, targetID)
@@ -1503,7 +1512,7 @@ func main() {
 			return respondError(c, http.StatusInternalServerError, "Failed to remove close friend")
 		}
 		return c.JSON(http.StatusOK, map[string]string{"message": "Close friend removed"})
-	})
+	}))
 
 	e.GET("/users/:id/close-friends", func(c echo.Context) error {
 		userID := c.Param("id")
@@ -1926,8 +1935,11 @@ func main() {
 		})
 	}))
 
-	e.POST("/users/:id/cover", func(c echo.Context) error {
+	e.POST("/users/:id/cover", jwtRequired(db, func(c echo.Context) error {
 		userID := c.Param("id")
+		if err := requireSelf(c, userID); err != nil {
+			return err
+		}
 
 		var exists bool
 		err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists)
@@ -1981,7 +1993,7 @@ func main() {
 			"message":   "Cover image uploaded successfully",
 			"cover_url": coverURL,
 		})
-	})
+	}))
 
 	// --- すれ違い保存（重複排除・クールタイム付き） ---
 	e.POST("/encounters", jwtRequired(db, func(c echo.Context) error {
