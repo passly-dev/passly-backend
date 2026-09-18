@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v4"
@@ -126,6 +127,92 @@ func getEncounterCooldownSeconds() int {
 		return defaultSeconds
 	}
 	return parsed
+}
+
+// --- 認証(JWT) ---
+// POST /login 成功時にuser_idをclaimに含めて署名発行し、なりすまし被害の大きい
+// エンドポイント(プロフィール編集・削除・アバター変更)に限定して検証を必須にする。
+// すれ違い記録系(POST /encounters, /encounters/batch)は、実機で検証済みの
+// BLE検知〜記録フローをフロント側のトークン送信対応が終わるまで壊さないため、
+// 今回はあえて対象外としている(段階的に広げる想定。8章のTODO参照)。
+
+func getJWTSecret() []byte {
+	secret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	if secret == "" {
+		// 未設定時の開発用フォールバック。本番(Render)では必ずJWT_SECRETを設定すること。
+		secret = "insecure-dev-secret-change-me"
+	}
+	return []byte(secret)
+}
+
+func getJWTExpiry() time.Duration {
+	// 展示当日+準備日を見込んで長めの単一トークン・リフレッシュトークン無しの方式。
+	const defaultHours = 72
+	raw := strings.TrimSpace(os.Getenv("JWT_EXPIRY_HOURS"))
+	if raw == "" {
+		return defaultHours * time.Hour
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return defaultHours * time.Hour
+	}
+	return time.Duration(parsed) * time.Hour
+}
+
+type jwtClaims struct {
+	UserID string `json:"user_id"`
+	jwt.RegisteredClaims
+}
+
+func generateJWT(userID string) (string, error) {
+	now := time.Now()
+	claims := jwtClaims{
+		UserID: userID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(getJWTExpiry())),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(getJWTSecret())
+}
+
+// jwtRequired は Authorization: Bearer <token> を検証し、成功時はリクエスト
+// コンテキストに認証済みuser_idを "auth_user_id" として保存してから本来の
+// ハンドラを呼び出す。
+func jwtRequired(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		authHeader := c.Request().Header.Get("Authorization")
+		const prefix = "Bearer "
+		if !strings.HasPrefix(authHeader, prefix) {
+			return respondError(c, http.StatusUnauthorized, "missing or invalid Authorization header")
+		}
+		tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, prefix))
+
+		claims := &jwtClaims{}
+		token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+			}
+			return getJWTSecret(), nil
+		})
+		if err != nil || !token.Valid || claims.UserID == "" {
+			return respondError(c, http.StatusUnauthorized, "invalid or expired token")
+		}
+
+		c.Set("auth_user_id", claims.UserID)
+		return next(c)
+	}
+}
+
+// requireSelf は、パス/ボディで指定されたuser_idが認証済み本人と一致するかを
+// 確認する。jwtRequired と組み合わせて使う(auth_user_idが未設定なら弾く)。
+func requireSelf(c echo.Context, targetUserID string) error {
+	authUserID, _ := c.Get("auth_user_id").(string)
+	if authUserID == "" || authUserID != targetUserID {
+		return respondError(c, http.StatusForbidden, "forbidden: token does not match requested user")
+	}
+	return nil
 }
 
 func resolveUserIDFromToken(db *sql.DB, token string) (string, error) {
@@ -689,9 +776,16 @@ func main() {
 			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "Invalid password"})
 		}
 
+		token, err := generateJWT(userID)
+		if err != nil {
+			log.Printf("jwt generate error user_id=%s err=%v", userID, err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to issue token"})
+		}
+
 		return c.JSON(http.StatusOK, map[string]string{
 			"message": "Login successful",
 			"user_id": userID,
+			"token":   token,
 		})
 	})
 
@@ -1483,8 +1577,11 @@ func main() {
 		return c.JSON(http.StatusOK, u)
 	})
 
-	e.PATCH("/users/:id", func(c echo.Context) error {
+	e.PATCH("/users/:id", jwtRequired(func(c echo.Context) error {
 		userID := c.Param("id")
+		if err := requireSelf(c, userID); err != nil {
+			return err
+		}
 
 		var exists bool
 		err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists)
@@ -1547,10 +1644,13 @@ func main() {
 		return c.JSON(http.StatusOK, map[string]string{
 			"message": "User profile updated successfully",
 		})
-	})
+	}))
 
-	e.DELETE("/users/:id", func(c echo.Context) error {
+	e.DELETE("/users/:id", jwtRequired(func(c echo.Context) error {
 		userID := c.Param("id")
+		if err := requireSelf(c, userID); err != nil {
+			return err
+		}
 
 		tx, err := db.Begin()
 		if err != nil {
@@ -1603,10 +1703,13 @@ func main() {
 		}
 
 		return c.JSON(http.StatusOK, map[string]string{"message": "User deleted"})
-	})
+	}))
 
-	e.POST("/users/:id/avatar", func(c echo.Context) error {
+	e.POST("/users/:id/avatar", jwtRequired(func(c echo.Context) error {
 		userID := c.Param("id")
+		if err := requireSelf(c, userID); err != nil {
+			return err
+		}
 
 		var exists bool
 		err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists)
@@ -1651,16 +1754,26 @@ func main() {
 		}
 
 		updateQuery := `UPDATE users SET icon_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
-		_, err = db.Exec(updateQuery, avatarURL, userID)
+		result, err := db.Exec(updateQuery, avatarURL, userID)
 		if err != nil {
+			log.Printf("avatar db update error user_id=%q avatar_url=%q err=%v", userID, avatarURL, err)
 			return respondError(c, http.StatusInternalServerError, "failed to update user profile")
+		}
+		// UPDATEはWHERE条件に一致する行が0件でもGoのerrorにはならないため、
+		// 「200を返したのにDBには反映されていない」という事故を防ぐために
+		// 実際の更新件数を必ず確認する。
+		rowsAffected, raErr := result.RowsAffected()
+		log.Printf("avatar db update user_id=%q avatar_url=%q rows_affected=%d rows_affected_err=%v", userID, avatarURL, rowsAffected, raErr)
+		if raErr == nil && rowsAffected == 0 {
+			log.Printf("avatar update matched 0 rows for user_id=%q — icon_url was NOT persisted", userID)
+			return respondError(c, http.StatusInternalServerError, "avatar upload succeeded but user record was not updated (0 rows matched)")
 		}
 
 		return c.JSON(http.StatusOK, map[string]string{
 			"message":  "Avatar uploaded successfully",
 			"icon_url": avatarURL,
 		})
-	})
+	}))
 
 	e.POST("/users/:id/cover", func(c echo.Context) error {
 		userID := c.Param("id")
