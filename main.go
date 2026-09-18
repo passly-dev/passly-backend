@@ -133,9 +133,12 @@ func getEncounterCooldownSeconds() int {
 // --- 認証(JWT) ---
 // POST /login 成功時にuser_idをclaimに含めて署名発行し、なりすまし被害の大きい
 // エンドポイント(プロフィール編集・削除・アバター変更)に限定して検証を必須にする。
-// すれ違い記録系(POST /encounters, /encounters/batch)は、実機で検証済みの
-// BLE検知〜記録フローをフロント側のトークン送信対応が終わるまで壊さないため、
-// 今回はあえて対象外としている(段階的に広げる想定。8章のTODO参照)。
+// すれ違い記録系のうち POST /encounters は、実機で検証済みのBLE検知〜記録フローを
+// フロント側のトークン送信対応が終わるまで壊さないため、今回はあえて対象外としている
+// (段階的に広げる想定。8章のTODO参照)。
+// POST /users/:id/encounters/batch(オフライン一括送信)はフロント未実装でまだ
+// 実際のトラフィックが無いため、リスクなく先行してJWT必須化している(my_idの
+// なりすまし防止、2026-09-18)。
 
 func getJWTSecret() []byte {
 	secret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
@@ -239,6 +242,45 @@ func resolveUserIDFromToken(db *sql.DB, token string) (string, error) {
 	}
 
 	return "", errors.New("invalid or expired token")
+}
+
+// resolveUserIDFromTokenAt は resolveUserIDFromToken と異なり、「現在時刻」ではなく
+// 呼び出し側が指定した基準時刻(オフライン一括送信の場合はクライアント申告の検知時刻
+// detected_at)を基準にトークンの有効性を判定する。スマホ側の時計ズレを考慮し、
+// 有効期間の前後に slop 分の許容誤差を持たせる。valid_from が設定されているトークン
+// (事前配布APIで発行された分)は、その時刻より前は無効。未設定(従来のオンデマンド
+// 発行分)なら開始時刻側の制約はかからない。
+func resolveUserIDFromTokenAt(db *sql.DB, token string, referenceTime time.Time, slop time.Duration) (string, error) {
+	if token == "" {
+		return "", errors.New("token is required")
+	}
+
+	var resolvedUserID string
+	var expiresAt time.Time
+	var validFrom sql.NullTime
+	query := `
+		SELECT user_id, expires_at, valid_from
+		FROM ephemeral_tokens
+		WHERE token = $1
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+	err := db.QueryRow(query, token).Scan(&resolvedUserID, &expiresAt, &validFrom)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", errors.New("invalid or expired token")
+		}
+		return "", fmt.Errorf("failed to resolve token from db: %w", err)
+	}
+
+	if referenceTime.After(expiresAt.Add(slop)) {
+		return "", errors.New("token had already expired at the reported time")
+	}
+	if validFrom.Valid && referenceTime.Before(validFrom.Time.Add(-slop)) {
+		return "", errors.New("token was not yet valid at the reported time")
+	}
+
+	return resolvedUserID, nil
 }
 
 func isConnpassMockEnabled() bool {
@@ -694,6 +736,77 @@ func main() {
 			"expires_at": expiresAt,
 		})
 	})
+
+	// オフライン用トークン事前配布API(2026-09-18追加)。
+	// オフライン中はサーバーに5分おきの再取得ができないため、これから先の時間帯に
+	// 使うトークンをまとめて事前発行し、それぞれの有効開始時刻(valid_from)・
+	// 有効期限(expires_at)を添えて返す。クライアント側はオフラインになる前に
+	// この一覧を取得しておき、時刻に応じて広告するトークンを順番に切り替える。
+	// このAPIは自分自身のトークンしか取得できないようJWT必須にしている。
+	// 未認証のままだと、他人のuser_idさえ知っていれば誰でもそのユーザーになりすませる
+	// 有効なトークンをまとめて入手できてしまうため(2026-09-18、設計レビューで発覚)。
+	e.GET("/users/:id/ephemeral-tokens/prefetch", jwtRequired(func(c echo.Context) error {
+		userID := c.Param("id")
+		if userID == "" {
+			return respondError(c, http.StatusBadRequest, "id is required")
+		}
+		if err := requireSelf(c, userID); err != nil {
+			return err
+		}
+
+		const slotCount = 12                 // 事前発行する個数
+		const slotDuration = 5 * time.Minute // 1個あたりの有効時間(オンライン時のローテーション間隔と揃える)
+
+		type PrefetchToken struct {
+			Token     string `json:"token"`
+			ValidFrom string `json:"valid_from"`
+			ExpiresAt string `json:"expires_at"`
+		}
+
+		now := time.Now().UTC()
+		tokens := make([]PrefetchToken, 0, slotCount)
+
+		tx, err := db.Begin()
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "failed to start transaction")
+		}
+		defer tx.Rollback()
+
+		upsertQuery := `
+			INSERT INTO ephemeral_tokens (token, user_id, valid_from, expires_at)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (token)
+			DO UPDATE SET user_id = EXCLUDED.user_id, valid_from = EXCLUDED.valid_from, expires_at = EXCLUDED.expires_at, created_at = CURRENT_TIMESTAMP
+		`
+
+		for i := 0; i < slotCount; i++ {
+			validFrom := now.Add(time.Duration(i) * slotDuration)
+			expiresAt := validFrom.Add(slotDuration)
+
+			token, terr := generateEphemeralToken()
+			if terr != nil {
+				return respondError(c, http.StatusInternalServerError, "failed to generate token")
+			}
+
+			if _, err := tx.Exec(upsertQuery, token, userID, validFrom, expiresAt); err != nil {
+				return respondError(c, http.StatusInternalServerError, "failed to store token")
+			}
+
+			tokens = append(tokens, PrefetchToken{
+				Token:     token,
+				ValidFrom: validFrom.Format(time.RFC3339),
+				ExpiresAt: expiresAt.Format(time.RFC3339),
+			})
+		}
+
+		if err := tx.Commit(); err != nil {
+			return respondError(c, http.StatusInternalServerError, "failed to commit prefetched tokens")
+		}
+
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"tokens": tokens,
+		})
+	}))
 
 	e.POST("/encounters/resolve", func(c echo.Context) error {
 		var req struct {
@@ -1950,10 +2063,15 @@ func main() {
 	})
 
 	// --- すれ違い一括登録（オフライン時にローカルへ貯めた分をまとめて送信するためのAPI） ---
-	e.POST("/users/:id/encounters/batch", func(c echo.Context) error {
+	e.POST("/users/:id/encounters/batch", jwtRequired(func(c echo.Context) error {
 		myID := c.Param("id")
 		if myID == "" {
 			return respondError(c, http.StatusBadRequest, "id is required")
+		}
+		// なりすまし対策: my_id はパスパラメータをそのまま信用せず、JWTの
+		// auth_user_idと一致するか必ず確認する(2026-09-18)。
+		if err := requireSelf(c, myID); err != nil {
+			return err
 		}
 
 		var req struct {
@@ -2021,7 +2139,9 @@ func main() {
 					continue
 				}
 
-				resolved, rerr := resolveUserIDFromToken(db, token)
+				// サーバーの「現在時刻」ではなく、クライアント申告の検知時刻(detectedAt)を
+				// 基準にトークンの有効性を判定する(時計ズレ対策で前後60秒の許容誤差)。
+				resolved, rerr := resolveUserIDFromTokenAt(db, token, detectedAt, 60*time.Second)
 				if rerr != nil {
 					log.Printf("batch encounter token resolve failed my_id=%s index=%d err=%v", myID, i, rerr)
 					result.Status = "invalid_token"
@@ -2087,7 +2207,7 @@ func main() {
 		return c.JSON(http.StatusOK, map[string]interface{}{
 			"results": results,
 		})
-	})
+	}))
 
 	e.GET("/", func(c echo.Context) error {
 		return c.String(http.StatusOK, "passly API Server is running!")
@@ -2188,6 +2308,9 @@ func initDB(db *sql.DB) {
 			expires_at TIMESTAMP NOT NULL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`,
+		// オフライン用トークン事前配布API(2026-09-18)で使用。NULLの場合は従来通り
+		// 開始時刻の制約なし(オンデマンド発行分)。
+		`ALTER TABLE ephemeral_tokens ADD COLUMN IF NOT EXISTS valid_from TIMESTAMP;`,
 		`CREATE INDEX IF NOT EXISTS idx_ephemeral_tokens_user_id ON ephemeral_tokens(user_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_ephemeral_tokens_expires_at ON ephemeral_tokens(expires_at);`,
 		`CREATE TABLE IF NOT EXISTS close_friends (
