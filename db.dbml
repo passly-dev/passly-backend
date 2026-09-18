@@ -5,6 +5,7 @@ Table users {
   email varchar [unique, not null]
   password_hash text [not null]
   icon_url text
+  cover_url text
   one_word text
   role varchar
   tech_stack text

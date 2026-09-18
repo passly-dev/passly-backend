@@ -32,6 +32,7 @@ type User struct {
 	Email            string `json:"email"`
 	Password         string `json:"password,omitempty"`
 	IconURL          string `json:"icon_url"`
+	CoverURL         string `json:"cover_url"`
 	OneWord          string `json:"one_word"`
 	Role             string `json:"role"`
 	TechStack        string `json:"tech_stack"`
@@ -1086,42 +1087,70 @@ func main() {
 		userID := c.Param("id")
 
 		rows, err := db.Query(`
-			SELECT id, name, icon_url, one_word, created_at, is_confirmed
+			SELECT
+				u.id,
+				u.name,
+				COALESCE(u.icon_url, '') AS icon_url,
+				COALESCE(u.one_word, '') AS one_word,
+				COALESCE(u.role, 'other') AS role,
+				COALESCE(u.tech_stack, '') AS tech_stack,
+				COALESCE(u.affiliation, '') AS affiliation,
+				le.met_at,
+				COALESCE(ev.name, '') AS event_name,
+				EXISTS(
+					SELECT 1 FROM close_friends cf
+					WHERE cf.user_id = $1 AND cf.friend_id = u.id
+				) AS is_close_friend
 			FROM (
-				SELECT DISTINCT ON (u.id)
-					u.id,
-					u.name,
-					COALESCE(u.icon_url, '') AS icon_url,
-					COALESCE(u.one_word, '') AS one_word,
-					e.created_at,
-					e.is_confirmed
+				SELECT DISTINCT
+					CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END AS other_id
 				FROM encounters e
-				JOIN users u ON u.id = CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END
 				WHERE e.my_id = $1 OR e.target_id = $1
-				ORDER BY u.id, e.created_at DESC
-			) latest
-			ORDER BY RANDOM()
-			LIMIT 10
+			) counterparts
+			JOIN users u ON u.id = counterparts.other_id
+			LEFT JOIN LATERAL (
+				SELECT e.created_at AS met_at, e.event_id
+				FROM encounters e
+				WHERE (e.my_id = $1 AND e.target_id = u.id)
+				   OR (e.my_id = u.id AND e.target_id = $1)
+				ORDER BY e.created_at DESC
+				LIMIT 1
+			) le ON true
+			LEFT JOIN events ev ON ev.id = le.event_id
+			ORDER BY le.met_at DESC
 		`, userID)
 		if err != nil {
+			log.Printf("Failed to query encounters (user_id=%s): %v", userID, err)
 			return respondError(c, http.StatusInternalServerError, "Failed to query encounters")
 		}
 		defer rows.Close()
 
-		type PlazaEncounter struct {
-			ID          string    `json:"id"`
-			Name        string    `json:"name"`
-			IconURL     string    `json:"icon_url"`
-			OneWord     string    `json:"one_word"`
-			CreatedAt   time.Time `json:"created_at"`
-			IsConfirmed bool      `json:"is_confirmed"`
+		type LastEncounterJSON struct {
+			MetAt     time.Time `json:"met_at"`
+			EventName string    `json:"event_name"`
+		}
+		type EncounterUser struct {
+			ID            string             `json:"id"`
+			Name          string             `json:"name"`
+			IconURL       string             `json:"icon_url"`
+			OneWord       string             `json:"one_word"`
+			Role          string             `json:"role"`
+			TechStack     string             `json:"tech_stack"`
+			Affiliation   string             `json:"affiliation"`
+			IsCloseFriend bool               `json:"is_close_friend"`
+			LastEncounter *LastEncounterJSON `json:"last_encounter"`
 		}
 
-		encounters := make([]PlazaEncounter, 0)
+		encounters := make([]EncounterUser, 0)
 		for rows.Next() {
-			var item PlazaEncounter
-			if err := rows.Scan(&item.ID, &item.Name, &item.IconURL, &item.OneWord, &item.CreatedAt, &item.IsConfirmed); err != nil {
+			var item EncounterUser
+			var metAt sql.NullTime
+			var eventName string
+			if err := rows.Scan(&item.ID, &item.Name, &item.IconURL, &item.OneWord, &item.Role, &item.TechStack, &item.Affiliation, &metAt, &eventName, &item.IsCloseFriend); err != nil {
 				return respondError(c, http.StatusInternalServerError, "Failed to scan encounter record")
+			}
+			if metAt.Valid {
+				item.LastEncounter = &LastEncounterJSON{MetAt: metAt.Time, EventName: eventName}
 			}
 			encounters = append(encounters, item)
 		}
@@ -1378,6 +1407,7 @@ func main() {
 			id,
 			name,
 			COALESCE(icon_url, ''),
+			COALESCE(cover_url, ''),
 			COALESCE(one_word, ''),
 			COALESCE(role, 'other'),
 			COALESCE(tech_stack, ''),
@@ -1388,7 +1418,7 @@ func main() {
 			COALESCE(connpass_username, '')
 		FROM users
 		WHERE id = $1`
-		err := db.QueryRow(query, id).Scan(&u.ID, &u.Name, &u.IconURL, &u.OneWord, &u.Role, &u.TechStack, &u.TwitterURL, &u.GitHubURL, &u.PortfolioURL, &u.Affiliation, &u.ConnpassUsername)
+		err := db.QueryRow(query, id).Scan(&u.ID, &u.Name, &u.IconURL, &u.CoverURL, &u.OneWord, &u.Role, &u.TechStack, &u.TwitterURL, &u.GitHubURL, &u.PortfolioURL, &u.Affiliation, &u.ConnpassUsername)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return c.JSON(http.StatusNotFound, map[string]string{"error": "User not found"})
@@ -1510,9 +1540,12 @@ func main() {
 			return respondError(c, http.StatusInternalServerError, "Failed to delete user")
 		}
 
-		// アバター画像の削除はベストエフォート。失敗してもアカウント削除自体は成功として扱う。
+		// アバター・カバー画像の削除はベストエフォート。失敗してもアカウント削除自体は成功として扱う。
 		if err := cleanupOldAvatars(c.Request().Context(), userID); err != nil {
 			log.Printf("Failed to cleanup avatar files for user %s: %v", userID, err)
+		}
+		if err := cleanupOldCovers(c.Request().Context(), userID); err != nil {
+			log.Printf("Failed to cleanup cover files for user %s: %v", userID, err)
 		}
 
 		return c.JSON(http.StatusOK, map[string]string{"message": "User deleted"})
@@ -1572,6 +1605,63 @@ func main() {
 		return c.JSON(http.StatusOK, map[string]string{
 			"message":  "Avatar uploaded successfully",
 			"icon_url": avatarURL,
+		})
+	})
+
+	e.POST("/users/:id/cover", func(c echo.Context) error {
+		userID := c.Param("id")
+
+		var exists bool
+		err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists)
+		if err != nil || !exists {
+			return respondError(c, http.StatusNotFound, "User not found")
+		}
+
+		file, err := c.FormFile("cover")
+		if err != nil {
+			return respondError(c, http.StatusBadRequest, "cover file is required")
+		}
+
+		const maxSize = 5 * 1024 * 1024
+		if file.Size > maxSize {
+			return respondError(c, http.StatusBadRequest, fmt.Sprintf("file size exceeds %d bytes", maxSize))
+		}
+
+		allowedMimes := map[string]bool{
+			"image/jpeg": true,
+			"image/png":  true,
+			"image/gif":  true,
+			"image/webp": true,
+		}
+		if !allowedMimes[file.Header.Get("Content-Type")] {
+			return respondError(c, http.StatusBadRequest, "only JPEG, PNG, GIF, WebP allowed")
+		}
+
+		src, err := file.Open()
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "failed to read file")
+		}
+
+		fileName := fmt.Sprintf("%s_%s%s", userID, uuid.New().String(), getFileExt(file.Filename))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		coverURL, err := UploadUserCover(ctx, userID, src, fileName)
+		if err != nil {
+			log.Printf("Firebase upload error: %v", err)
+			return respondError(c, http.StatusInternalServerError, "failed to upload cover")
+		}
+
+		updateQuery := `UPDATE users SET cover_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
+		_, err = db.Exec(updateQuery, coverURL, userID)
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "failed to update user profile")
+		}
+
+		return c.JSON(http.StatusOK, map[string]string{
+			"message":   "Cover image uploaded successfully",
+			"cover_url": coverURL,
 		})
 	})
 
@@ -1711,6 +1801,7 @@ func initDB(db *sql.DB) {
             email VARCHAR(255) UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             icon_url TEXT,
+            cover_url TEXT,
             one_word TEXT,
             role VARCHAR(50),
             tech_stack TEXT,
@@ -1723,6 +1814,7 @@ func initDB(db *sql.DB) {
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS connpass_username VARCHAR(255);`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS cover_url TEXT;`,
 		`CREATE TABLE IF NOT EXISTS events (
             id SERIAL PRIMARY KEY,
             name VARCHAR(255) NOT NULL,

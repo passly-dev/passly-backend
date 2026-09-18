@@ -105,6 +105,61 @@ func cleanupOldAvatars(ctx context.Context, userID string) error {
     return nil
 }
 
+// UploadUserCover ユーザーカバー（プロフィール背景）画像を Firebase Storage にアップロード
+// 戻り値: 公開可能な URL、エラー
+func UploadUserCover(ctx context.Context, userID string, fileReader io.ReadCloser, fileName string) (string, error) {
+    defer fileReader.Close()
+
+    // ファイルパス: users/{userID}/cover/{fileName}
+    filePath := fmt.Sprintf("users/%s/cover/%s", userID, fileName)
+
+    // 既存のカバー画像を削除（オプション）
+    _ = cleanupOldCovers(ctx, userID)
+
+    // アップロード
+    wc := storageClient.Bucket(bucketName).Object(filePath).NewWriter(ctx)
+    wc.ContentType = getContentType(fileName)
+
+    if _, err := io.Copy(wc, fileReader); err != nil {
+        return "", fmt.Errorf("upload copy failed: %v", err)
+    }
+
+    if err := wc.Close(); err != nil {
+        return "", fmt.Errorf("write close failed: %v", err)
+    }
+
+    // 公開 URL を生成
+    publicURL := fmt.Sprintf(
+        "https://storage.googleapis.com/%s/%s",
+        bucketName,
+        filePath,
+    )
+
+    return publicURL, nil
+}
+
+// cleanupOldCovers 古いカバー画像を削除
+func cleanupOldCovers(ctx context.Context, userID string) error {
+    prefix := fmt.Sprintf("users/%s/cover/", userID)
+    it := storageClient.Bucket(bucketName).Objects(ctx, &storage.Query{Prefix: prefix})
+
+    for {
+        attrs, err := it.Next()
+        if err == storage.ErrObjectNotExist {
+            break
+        }
+        if err != nil {
+            return err
+        }
+
+        if err := storageClient.Bucket(bucketName).Object(attrs.Name).Delete(ctx); err != nil {
+            continue // エラーは無視してスキップ
+        }
+    }
+
+    return nil
+}
+
 // getContentType ファイル拡張子から Content-Type を推定
 func getContentType(fileName string) string {
     ext := strings.ToLower(filepath.Ext(fileName))
