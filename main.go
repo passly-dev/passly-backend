@@ -934,7 +934,7 @@ func main() {
 		}
 
 		var todayEncounters int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE DATE(created_at) = CURRENT_DATE`).Scan(&todayEncounters); err != nil {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM encounters WHERE DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Tokyo') = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Tokyo')::date`).Scan(&todayEncounters); err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to count today encounters")
 		}
 
@@ -977,7 +977,7 @@ func main() {
 			SELECT COUNT(DISTINCT CASE WHEN my_id = $1 THEN target_id ELSE my_id END)
 			FROM encounters
 			WHERE (my_id = $1 OR target_id = $1)
-			  AND DATE(created_at) = CURRENT_DATE
+			  AND DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Tokyo') = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Tokyo')::date
 		`, userID).Scan(&res.TodayEncounters); err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to count today encounters")
 		}
@@ -1031,7 +1031,7 @@ func main() {
 						FROM encounters e
 						JOIN users u ON u.id = CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END
 						WHERE (e.my_id = $1 OR e.target_id = $1)
-							AND DATE(e.created_at) = CURRENT_DATE
+							AND DATE(e.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Tokyo') = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Tokyo')::date
             ORDER BY RANDOM()
             LIMIT 3`, userID)
 		if err != nil {
@@ -1603,7 +1603,7 @@ func main() {
 			SELECT COUNT(DISTINCT CASE WHEN my_id = $1 THEN target_id ELSE my_id END)
 			FROM encounters
 			WHERE (my_id = $1 OR target_id = $1)
-			  AND DATE(created_at) = $2
+			  AND DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Tokyo') = $2::date
 		`
 		if err := db.QueryRow(countQuery, userID, dateStr).Scan(&res.EncounterCount); err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to count encounters")
