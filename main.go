@@ -1833,6 +1833,146 @@ func main() {
 		return c.JSON(http.StatusCreated, enc)
 	})
 
+	// --- すれ違い一括登録（オフライン時にローカルへ貯めた分をまとめて送信するためのAPI） ---
+	e.POST("/users/:id/encounters/batch", func(c echo.Context) error {
+		myID := c.Param("id")
+		if myID == "" {
+			return respondError(c, http.StatusBadRequest, "id is required")
+		}
+
+		var req struct {
+			Encounters []struct {
+				TargetID    string `json:"target_id"`
+				TargetToken string `json:"target_token"`
+				Token       string `json:"token"`
+				EphemeralID string `json:"ephemeral_id"`
+				EventID     *int   `json:"event_id"`
+				DetectedAt  string `json:"detected_at"`
+			} `json:"encounters"`
+		}
+		if err := c.Bind(&req); err != nil {
+			return respondError(c, http.StatusBadRequest, "Invalid request format")
+		}
+
+		const maxBatchSize = 200
+		if len(req.Encounters) == 0 {
+			return respondError(c, http.StatusBadRequest, "encounters must not be empty")
+		}
+		if len(req.Encounters) > maxBatchSize {
+			return respondError(c, http.StatusBadRequest, fmt.Sprintf("encounters exceeds max batch size of %d", maxBatchSize))
+		}
+
+		type BatchResultItem struct {
+			Index    int    `json:"index"`
+			Status   string `json:"status"` // created | skipped_duplicate | skipped_self | invalid_token | error
+			Message  string `json:"message,omitempty"`
+			TargetID string `json:"target_id,omitempty"`
+			ID       *int   `json:"id,omitempty"`
+		}
+
+		results := make([]BatchResultItem, len(req.Encounters))
+
+		for i, item := range req.Encounters {
+			result := BatchResultItem{Index: i}
+
+			// detected_at: クライアントが実際に検知した時刻(RFC3339)。
+			// オフラインでまとめて送る想定のため、サーバー受信時刻ではなく検知時刻をcreated_atに使う。
+			detectedAt := time.Now().UTC()
+			if item.DetectedAt != "" {
+				parsed, perr := time.Parse(time.RFC3339, item.DetectedAt)
+				if perr != nil {
+					result.Status = "error"
+					result.Message = "invalid detected_at format (expected RFC3339)"
+					results[i] = result
+					continue
+				}
+				detectedAt = parsed.UTC()
+			}
+
+			targetID := item.TargetID
+			if targetID == "" {
+				token := item.TargetToken
+				if token == "" {
+					token = item.EphemeralID
+				}
+				if token == "" {
+					token = item.Token
+				}
+				if token == "" {
+					result.Status = "error"
+					result.Message = "target_id or target_token is required"
+					results[i] = result
+					continue
+				}
+
+				resolved, rerr := resolveUserIDFromToken(db, token)
+				if rerr != nil {
+					log.Printf("batch encounter token resolve failed my_id=%s index=%d err=%v", myID, i, rerr)
+					result.Status = "invalid_token"
+					result.Message = "invalid or expired token"
+					results[i] = result
+					continue
+				}
+				targetID = resolved
+			}
+
+			if targetID == myID {
+				result.Status = "skipped_self"
+				results[i] = result
+				continue
+			}
+			result.TargetID = targetID
+
+			// 同じペアが同日(検知時刻ベース)にすでに記録済みなら重複としてスキップ。
+			// リアルタイム投稿と違い、貯めておいた分をまとめて送る想定のため
+			// 直近クールダウン秒数によるチェックは行わない(同日重複排除とDBのユニーク制約のみで防ぐ)。
+			var existsSameDay bool
+			sameDayQuery := `
+				SELECT EXISTS (
+					SELECT 1 FROM encounters
+					WHERE ((my_id = $1 AND target_id = $2) OR (my_id = $2 AND target_id = $1))
+					AND DATE(created_at) = DATE($3)
+				)
+			`
+			if err := db.QueryRow(sameDayQuery, myID, targetID, detectedAt).Scan(&existsSameDay); err != nil {
+				log.Printf("batch encounter daily-check error my_id=%s target_id=%s err=%v", myID, targetID, err)
+				result.Status = "error"
+				result.Message = "database error during duplicate check"
+				results[i] = result
+				continue
+			}
+			if existsSameDay {
+				result.Status = "skipped_duplicate"
+				results[i] = result
+				continue
+			}
+
+			var newID int
+			insertQuery := `INSERT INTO encounters (my_id, target_id, event_id, created_at) VALUES ($1, $2, $3, $4) RETURNING id`
+			if err := db.QueryRow(insertQuery, myID, targetID, item.EventID, detectedAt).Scan(&newID); err != nil {
+				if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+					result.Status = "skipped_duplicate"
+					results[i] = result
+					continue
+				}
+				log.Printf("batch encounter insert error my_id=%s target_id=%s err=%v", myID, targetID, err)
+				result.Status = "error"
+				result.Message = "failed to record encounter"
+				results[i] = result
+				continue
+			}
+
+			log.Printf("batch encounter recorded id=%d my_id=%s target_id=%s detected_at=%s", newID, myID, targetID, detectedAt.Format(time.RFC3339))
+			result.Status = "created"
+			result.ID = &newID
+			results[i] = result
+		}
+
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"results": results,
+		})
+	})
+
 	e.GET("/", func(c echo.Context) error {
 		return c.String(http.StatusOK, "passly API Server is running!")
 	})
