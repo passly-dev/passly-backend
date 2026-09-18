@@ -1424,15 +1424,19 @@ func main() {
 		return c.JSON(http.StatusOK, encounters)
 	})
 
-	e.PUT("/users/:id/encounters/confirm", func(c echo.Context) error {
+	e.PUT("/users/:id/encounters/confirm", jwtRequired(func(c echo.Context) error {
 		userID := c.Param("id")
+		// 本人のみ確認操作を許可(2026-09-19)。
+		if err := requireSelf(c, userID); err != nil {
+			return err
+		}
 		query := `UPDATE encounters SET is_confirmed = TRUE WHERE (my_id = $1 OR target_id = $1) AND is_confirmed = FALSE`
 		_, err := db.Exec(query, userID)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to update confirmation status"})
 		}
 		return c.JSON(http.StatusOK, map[string]string{"message": "Encounters marked as confirmed"})
-	})
+	}))
 
 	// 親しい友達（close friends）
 	// フロント: lib/features/close_friend/data/close_friend_repository_api.dart が前提とするAPI。
@@ -1949,7 +1953,7 @@ func main() {
 	})
 
 	// --- すれ違い保存（重複排除・クールタイム付き） ---
-	e.POST("/encounters", func(c echo.Context) error {
+	e.POST("/encounters", jwtRequired(func(c echo.Context) error {
 		var req struct {
 			MyID        string `json:"my_id"`
 			TargetID    string `json:"target_id"`
@@ -1970,6 +1974,11 @@ func main() {
 
 		if enc.MyID == "" {
 			return respondError(c, http.StatusBadRequest, "my_id is required")
+		}
+
+		// なりすまし対策: my_id はJWTの認証済みユーザーと一致必須(2026-09-19)。
+		if err := requireSelf(c, enc.MyID); err != nil {
+			return err
 		}
 
 		enc.TargetID = req.TargetID
@@ -2060,7 +2069,7 @@ func main() {
 		}
 		log.Printf("encounter recorded id=%d my_id=%s target_id=%s", enc.ID, enc.MyID, enc.TargetID)
 		return c.JSON(http.StatusCreated, enc)
-	})
+	}))
 
 	// --- すれ違い一括登録（オフライン時にローカルへ貯めた分をまとめて送信するためのAPI） ---
 	e.POST("/users/:id/encounters/batch", jwtRequired(func(c echo.Context) error {
