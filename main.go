@@ -41,6 +41,7 @@ type User struct {
 	GitHubURL        string `json:"github_url"`
 	PortfolioURL     string `json:"portfolio_url"`
 	Affiliation      string `json:"affiliation"`
+	About            string `json:"about"`
 	ConnpassUsername string `json:"connpass_username"`
 }
 
@@ -1563,10 +1564,11 @@ func main() {
 			COALESCE(github_url, ''),
 			COALESCE(portfolio_url, ''),
 			COALESCE(affiliation, ''),
+			COALESCE(about, ''),
 			COALESCE(connpass_username, '')
 		FROM users
 		WHERE id = $1`
-		err := db.QueryRow(query, id).Scan(&u.ID, &u.Name, &u.IconURL, &u.CoverURL, &u.OneWord, &u.Role, &u.TechStack, &u.TwitterURL, &u.GitHubURL, &u.PortfolioURL, &u.Affiliation, &u.ConnpassUsername)
+		err := db.QueryRow(query, id).Scan(&u.ID, &u.Name, &u.IconURL, &u.CoverURL, &u.OneWord, &u.Role, &u.TechStack, &u.TwitterURL, &u.GitHubURL, &u.PortfolioURL, &u.Affiliation, &u.About, &u.ConnpassUsername)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return c.JSON(http.StatusNotFound, map[string]string{"error": "User not found"})
@@ -1612,6 +1614,7 @@ func main() {
 			"portfolio_url":     "portfolio_url",
 			"affiliation":       "affiliation",
 			"connpass_username": "connpass_username",
+			"about":             "about",
 		}
 
 		for jsonKey, dbCol := range optionalFields {
@@ -2116,12 +2119,14 @@ func initDB(db *sql.DB) {
             github_url TEXT,
             portfolio_url TEXT,
             affiliation TEXT,
+            about TEXT,
             connpass_username VARCHAR(255),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS connpass_username VARCHAR(255);`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS cover_url TEXT;`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS about TEXT;`,
 		`CREATE TABLE IF NOT EXISTS events (
             id SERIAL PRIMARY KEY,
             name VARCHAR(255) NOT NULL,
