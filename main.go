@@ -164,14 +164,16 @@ func getJWTExpiry() time.Duration {
 }
 
 type jwtClaims struct {
-	UserID string `json:"user_id"`
+	UserID       string `json:"user_id"`
+	TokenVersion int    `json:"tv"`
 	jwt.RegisteredClaims
 }
 
-func generateJWT(userID string) (string, error) {
+func generateJWT(userID string, tokenVersion int) (string, error) {
 	now := time.Now()
 	claims := jwtClaims{
-		UserID: userID,
+		UserID:       userID,
+		TokenVersion: tokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(getJWTExpiry())),
@@ -184,7 +186,7 @@ func generateJWT(userID string) (string, error) {
 // jwtRequired は Authorization: Bearer <token> を検証し、成功時はリクエスト
 // コンテキストに認証済みuser_idを "auth_user_id" として保存してから本来の
 // ハンドラを呼び出す。
-func jwtRequired(next echo.HandlerFunc) echo.HandlerFunc {
+func jwtRequired(db *sql.DB, next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		authHeader := c.Request().Header.Get("Authorization")
 		const prefix = "Bearer "
@@ -202,6 +204,18 @@ func jwtRequired(next echo.HandlerFunc) echo.HandlerFunc {
 		})
 		if err != nil || !token.Valid || claims.UserID == "" {
 			return respondError(c, http.StatusUnauthorized, "invalid or expired token")
+		}
+
+		// 単一セッション: 発行時の token_version が DB の現在値と一致するか確認する。
+		// 新しいログインで DB 側が +1 されるため、古い端末のトークンはここで弾かれる
+		// (401 → フロントの既存処理で自動ログアウト)。既存の tv 無しトークンは 0 として
+		// 扱われ、DBの初期値 0 と一致するので再ログインするまでは従来どおり動作する。
+		// DB参照に失敗した場合は可用性優先で通す(署名は検証済み)。
+		var currentVersion int
+		if verr := db.QueryRow(`SELECT token_version FROM users WHERE id = $1`, claims.UserID).Scan(&currentVersion); verr == nil {
+			if currentVersion != claims.TokenVersion {
+				return respondError(c, http.StatusUnauthorized, "session superseded by a newer login")
+			}
 		}
 
 		c.Set("auth_user_id", claims.UserID)
@@ -745,7 +759,7 @@ func main() {
 	// このAPIは自分自身のトークンしか取得できないようJWT必須にしている。
 	// 未認証のままだと、他人のuser_idさえ知っていれば誰でもそのユーザーになりすませる
 	// 有効なトークンをまとめて入手できてしまうため(2026-09-18、設計レビューで発覚)。
-	e.GET("/users/:id/ephemeral-tokens", jwtRequired(func(c echo.Context) error {
+	e.GET("/users/:id/ephemeral-tokens", jwtRequired(db, func(c echo.Context) error {
 		userID := c.Param("id")
 		if userID == "" {
 			return respondError(c, http.StatusBadRequest, "id is required")
@@ -890,7 +904,17 @@ func main() {
 			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "Invalid password"})
 		}
 
-		token, err := generateJWT(userID)
+		// 単一セッション: ログインのたびに token_version を+1し、以前のトークンを無効化する。
+		var tokenVersion int
+		if verr := db.QueryRow(
+			`UPDATE users SET token_version = token_version + 1 WHERE id = $1 RETURNING token_version`,
+			userID,
+		).Scan(&tokenVersion); verr != nil {
+			log.Printf("token_version bump error user_id=%s err=%v", userID, verr)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update session"})
+		}
+
+		token, err := generateJWT(userID, tokenVersion)
 		if err != nil {
 			log.Printf("jwt generate error user_id=%s err=%v", userID, err)
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to issue token"})
@@ -1424,7 +1448,7 @@ func main() {
 		return c.JSON(http.StatusOK, encounters)
 	})
 
-	e.PUT("/users/:id/encounters/confirm", jwtRequired(func(c echo.Context) error {
+	e.PUT("/users/:id/encounters/confirm", jwtRequired(db, func(c echo.Context) error {
 		userID := c.Param("id")
 		// 本人のみ確認操作を許可(2026-09-19)。
 		if err := requireSelf(c, userID); err != nil {
@@ -1703,7 +1727,7 @@ func main() {
 		return c.JSON(http.StatusOK, u)
 	})
 
-	e.PATCH("/users/:id", jwtRequired(func(c echo.Context) error {
+	e.PATCH("/users/:id", jwtRequired(db, func(c echo.Context) error {
 		userID := c.Param("id")
 		if err := requireSelf(c, userID); err != nil {
 			return err
@@ -1773,7 +1797,7 @@ func main() {
 		})
 	}))
 
-	e.DELETE("/users/:id", jwtRequired(func(c echo.Context) error {
+	e.DELETE("/users/:id", jwtRequired(db, func(c echo.Context) error {
 		userID := c.Param("id")
 		if err := requireSelf(c, userID); err != nil {
 			return err
@@ -1832,7 +1856,7 @@ func main() {
 		return c.JSON(http.StatusOK, map[string]string{"message": "User deleted"})
 	}))
 
-	e.POST("/users/:id/avatar", jwtRequired(func(c echo.Context) error {
+	e.POST("/users/:id/avatar", jwtRequired(db, func(c echo.Context) error {
 		userID := c.Param("id")
 		if err := requireSelf(c, userID); err != nil {
 			return err
@@ -1960,7 +1984,7 @@ func main() {
 	})
 
 	// --- すれ違い保存（重複排除・クールタイム付き） ---
-	e.POST("/encounters", jwtRequired(func(c echo.Context) error {
+	e.POST("/encounters", jwtRequired(db, func(c echo.Context) error {
 		var req struct {
 			MyID        string `json:"my_id"`
 			TargetID    string `json:"target_id"`
@@ -2079,7 +2103,7 @@ func main() {
 	}))
 
 	// --- すれ違い一括登録（オフライン時にローカルへ貯めた分をまとめて送信するためのAPI） ---
-	e.POST("/encounters/batch", jwtRequired(func(c echo.Context) error {
+	e.POST("/encounters/batch", jwtRequired(db, func(c echo.Context) error {
 		// なりすまし対策: my_id はボディ/パスから受け取らず、必ずJWT(auth_user_id)から抽出する(設計書Phase1)。
 		myID, _ := c.Get("auth_user_id").(string)
 		if myID == "" {
@@ -2260,6 +2284,7 @@ func initDB(db *sql.DB) {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS connpass_username VARCHAR(255);`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS cover_url TEXT;`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS about TEXT;`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;`,
 		`CREATE TABLE IF NOT EXISTS events (
             id SERIAL PRIMARY KEY,
             name VARCHAR(255) NOT NULL,
