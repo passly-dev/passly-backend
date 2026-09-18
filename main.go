@@ -1636,7 +1636,7 @@ func main() {
 				FROM encounters e
 				JOIN users u ON u.id = CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END
 				WHERE (e.my_id = $1 OR e.target_id = $1)
-					AND DATE(e.created_at) = $2
+					AND DATE(e.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Tokyo') = $2::date
 				ORDER BY u.id, e.created_at DESC
 			) latest
 			ORDER BY created_at DESC
