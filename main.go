@@ -717,11 +717,20 @@ func main() {
 	e.GET("/users/:id/home", func(c echo.Context) error {
 		userID := c.Param("id")
 
+		type RecentEncounterJSON struct {
+			UserID    string    `json:"user_id"`
+			Name      string    `json:"name"`
+			IconURL   string    `json:"icon_url"`
+			MetAt     time.Time `json:"met_at"`
+			EventName string    `json:"event_name"`
+		}
+
 		type HomeData struct {
-			TotalEncounters int                      `json:"total_encounters"`
-			TodayEncounters int                      `json:"today_encounters"`
-			Unconfirmed     []map[string]interface{} `json:"unconfirmed"`
-			RandomThree     []map[string]interface{} `json:"random_three"`
+			TotalEncounters  int                      `json:"total_encounters"`
+			TodayEncounters  int                      `json:"today_encounters"`
+			Unconfirmed      []map[string]interface{} `json:"unconfirmed"`
+			RandomThree      []map[string]interface{} `json:"random_three"`
+			RecentEncounters []RecentEncounterJSON    `json:"recent_encounters"`
 		}
 		var res HomeData
 
@@ -817,6 +826,51 @@ func main() {
 			if err != nil {
 				return respondError(c, http.StatusInternalServerError, "Failed to query fallback random encounters")
 			}
+		}
+
+		// 「今まですれ違った人」(広場画面で使用): 相手ユーザー単位で重複排除し、
+		// 直近のすれ違い日時・イベント名を添えて全件返す。
+		recentRows, err := db.Query(`
+			SELECT
+				u.id,
+				u.name,
+				COALESCE(u.icon_url, '') AS icon_url,
+				le.met_at,
+				COALESCE(ev.name, '') AS event_name
+			FROM (
+				SELECT DISTINCT
+					CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END AS other_id
+				FROM encounters e
+				WHERE e.my_id = $1 OR e.target_id = $1
+			) counterparts
+			JOIN users u ON u.id = counterparts.other_id
+			JOIN LATERAL (
+				SELECT e.created_at AS met_at, e.event_id
+				FROM encounters e
+				WHERE (e.my_id = $1 AND e.target_id = u.id)
+				   OR (e.my_id = u.id AND e.target_id = $1)
+				ORDER BY e.created_at DESC
+				LIMIT 1
+			) le ON true
+			LEFT JOIN events ev ON ev.id = le.event_id
+			ORDER BY le.met_at DESC
+		`, userID)
+		if err != nil {
+			log.Printf("Failed to query recent encounters (user_id=%s): %v", userID, err)
+			return respondError(c, http.StatusInternalServerError, "Failed to query recent encounters")
+		}
+		defer recentRows.Close()
+
+		res.RecentEncounters = make([]RecentEncounterJSON, 0)
+		for recentRows.Next() {
+			var item RecentEncounterJSON
+			if err := recentRows.Scan(&item.UserID, &item.Name, &item.IconURL, &item.MetAt, &item.EventName); err != nil {
+				return respondError(c, http.StatusInternalServerError, "Failed to scan recent encounter record")
+			}
+			res.RecentEncounters = append(res.RecentEncounters, item)
+		}
+		if err := recentRows.Err(); err != nil {
+			return respondError(c, http.StatusInternalServerError, "Failed to iterate recent encounters")
 		}
 
 		return c.JSON(http.StatusOK, res)
