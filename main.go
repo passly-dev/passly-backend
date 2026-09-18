@@ -246,7 +246,7 @@ func resolveUserIDFromToken(db *sql.DB, token string) (string, error) {
 
 // resolveUserIDFromTokenAt は resolveUserIDFromToken と異なり、「現在時刻」ではなく
 // 呼び出し側が指定した基準時刻(オフライン一括送信の場合はクライアント申告の検知時刻
-// detected_at)を基準にトークンの有効性を判定する。スマホ側の時計ズレを考慮し、
+// encountered_at)を基準にトークンの有効性を判定する。スマホ側の時計ズレを考慮し、
 // 有効期間の前後に slop 分の許容誤差を持たせる。valid_from が設定されているトークン
 // (事前配布APIで発行された分)は、その時刻より前は無効。未設定(従来のオンデマンド
 // 発行分)なら開始時刻側の制約はかからない。
@@ -745,7 +745,7 @@ func main() {
 	// このAPIは自分自身のトークンしか取得できないようJWT必須にしている。
 	// 未認証のままだと、他人のuser_idさえ知っていれば誰でもそのユーザーになりすませる
 	// 有効なトークンをまとめて入手できてしまうため(2026-09-18、設計レビューで発覚)。
-	e.GET("/users/:id/ephemeral-tokens/prefetch", jwtRequired(func(c echo.Context) error {
+	e.GET("/users/:id/ephemeral-tokens", jwtRequired(func(c echo.Context) error {
 		userID := c.Param("id")
 		if userID == "" {
 			return respondError(c, http.StatusBadRequest, "id is required")
@@ -754,8 +754,8 @@ func main() {
 			return err
 		}
 
-		const slotCount = 12                 // 事前発行する個数
-		const slotDuration = 5 * time.Minute // 1個あたりの有効時間(オンライン時のローテーション間隔と揃える)
+		const slotCount = 24               // 事前発行する個数(24時間分)
+		const slotDuration = 1 * time.Hour // 1個あたりの有効時間(設計書: 1時間ごとに切替)
 
 		type PrefetchToken struct {
 			Token     string `json:"token"`
@@ -1573,7 +1573,14 @@ func main() {
 		}
 		var res DailyData
 
-		countQuery := `SELECT COUNT(*) FROM encounters WHERE (my_id = $1 OR target_id = $1) AND DATE(created_at) = $2`
+		// ホーム(today_encounters)と定義を揃えるため、レコード数ではなく
+		// 相手の人数(DISTINCT)でカウントする。
+		countQuery := `
+			SELECT COUNT(DISTINCT CASE WHEN my_id = $1 THEN target_id ELSE my_id END)
+			FROM encounters
+			WHERE (my_id = $1 OR target_id = $1)
+			  AND DATE(created_at) = $2
+		`
 		if err := db.QueryRow(countQuery, userID, dateStr).Scan(&res.EncounterCount); err != nil {
 			return respondError(c, http.StatusInternalServerError, "Failed to count encounters")
 		}
@@ -2072,32 +2079,28 @@ func main() {
 	}))
 
 	// --- すれ違い一括登録（オフライン時にローカルへ貯めた分をまとめて送信するためのAPI） ---
-	e.POST("/users/:id/encounters/batch", jwtRequired(func(c echo.Context) error {
-		myID := c.Param("id")
+	e.POST("/encounters/batch", jwtRequired(func(c echo.Context) error {
+		// なりすまし対策: my_id はボディ/パスから受け取らず、必ずJWT(auth_user_id)から抽出する(設計書Phase1)。
+		myID, _ := c.Get("auth_user_id").(string)
 		if myID == "" {
-			return respondError(c, http.StatusBadRequest, "id is required")
-		}
-		// なりすまし対策: my_id はパスパラメータをそのまま信用せず、JWTの
-		// auth_user_idと一致するか必ず確認する(2026-09-18)。
-		if err := requireSelf(c, myID); err != nil {
-			return err
+			return respondError(c, http.StatusUnauthorized, "unauthenticated")
 		}
 
 		var req struct {
 			Encounters []struct {
-				TargetID    string `json:"target_id"`
-				TargetToken string `json:"target_token"`
-				Token       string `json:"token"`
-				EphemeralID string `json:"ephemeral_id"`
-				EventID     *int   `json:"event_id"`
-				DetectedAt  string `json:"detected_at"`
+				TargetID      string `json:"target_id"`
+				TargetToken   string `json:"target_token"`
+				Token         string `json:"token"`
+				EphemeralID   string `json:"ephemeral_id"`
+				EventID       *int   `json:"event_id"`
+				EncounteredAt string `json:"encountered_at"`
 			} `json:"encounters"`
 		}
 		if err := c.Bind(&req); err != nil {
 			return respondError(c, http.StatusBadRequest, "Invalid request format")
 		}
 
-		const maxBatchSize = 200
+		const maxBatchSize = 1000
 		if len(req.Encounters) == 0 {
 			return respondError(c, http.StatusBadRequest, "encounters must not be empty")
 		}
@@ -2118,18 +2121,18 @@ func main() {
 		for i, item := range req.Encounters {
 			result := BatchResultItem{Index: i}
 
-			// detected_at: クライアントが実際に検知した時刻(RFC3339)。
+			// encountered_at: クライアントが実際に検知した時刻(RFC3339)。
 			// オフラインでまとめて送る想定のため、サーバー受信時刻ではなく検知時刻をcreated_atに使う。
-			detectedAt := time.Now().UTC()
-			if item.DetectedAt != "" {
-				parsed, perr := time.Parse(time.RFC3339, item.DetectedAt)
+			encounteredAt := time.Now().UTC()
+			if item.EncounteredAt != "" {
+				parsed, perr := time.Parse(time.RFC3339, item.EncounteredAt)
 				if perr != nil {
 					result.Status = "error"
-					result.Message = "invalid detected_at format (expected RFC3339)"
+					result.Message = "invalid encountered_at format (expected RFC3339)"
 					results[i] = result
 					continue
 				}
-				detectedAt = parsed.UTC()
+				encounteredAt = parsed.UTC()
 			}
 
 			targetID := item.TargetID
@@ -2148,9 +2151,9 @@ func main() {
 					continue
 				}
 
-				// サーバーの「現在時刻」ではなく、クライアント申告の検知時刻(detectedAt)を
+				// サーバーの「現在時刻」ではなく、クライアント申告の検知時刻(encounteredAt)を
 				// 基準にトークンの有効性を判定する(時計ズレ対策で前後60秒の許容誤差)。
-				resolved, rerr := resolveUserIDFromTokenAt(db, token, detectedAt, 60*time.Second)
+				resolved, rerr := resolveUserIDFromTokenAt(db, token, encounteredAt, 60*time.Second)
 				if rerr != nil {
 					log.Printf("batch encounter token resolve failed my_id=%s index=%d err=%v", myID, i, rerr)
 					result.Status = "invalid_token"
@@ -2179,7 +2182,7 @@ func main() {
 					AND DATE(created_at) = DATE($3)
 				)
 			`
-			if err := db.QueryRow(sameDayQuery, myID, targetID, detectedAt).Scan(&existsSameDay); err != nil {
+			if err := db.QueryRow(sameDayQuery, myID, targetID, encounteredAt).Scan(&existsSameDay); err != nil {
 				log.Printf("batch encounter daily-check error my_id=%s target_id=%s err=%v", myID, targetID, err)
 				result.Status = "error"
 				result.Message = "database error during duplicate check"
@@ -2194,7 +2197,7 @@ func main() {
 
 			var newID int
 			insertQuery := `INSERT INTO encounters (my_id, target_id, event_id, created_at) VALUES ($1, $2, $3, $4) RETURNING id`
-			if err := db.QueryRow(insertQuery, myID, targetID, item.EventID, detectedAt).Scan(&newID); err != nil {
+			if err := db.QueryRow(insertQuery, myID, targetID, item.EventID, encounteredAt).Scan(&newID); err != nil {
 				if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
 					result.Status = "skipped_duplicate"
 					results[i] = result
@@ -2207,14 +2210,15 @@ func main() {
 				continue
 			}
 
-			log.Printf("batch encounter recorded id=%d my_id=%s target_id=%s detected_at=%s", newID, myID, targetID, detectedAt.Format(time.RFC3339))
+			log.Printf("batch encounter recorded id=%d my_id=%s target_id=%s encountered_at=%s", newID, myID, targetID, encounteredAt.Format(time.RFC3339))
 			result.Status = "created"
 			result.ID = &newID
 			results[i] = result
 		}
 
-		return c.JSON(http.StatusOK, map[string]interface{}{
-			"results": results,
+		// 設計書Phase1/3: 重複・無効はスキップ済み。全体は正常(201)としてまとめて返す。
+		return c.JSON(http.StatusCreated, map[string]string{
+			"message": "Batch encounters successfully recorded",
 		})
 	}))
 
