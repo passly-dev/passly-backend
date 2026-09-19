@@ -2286,9 +2286,12 @@ func main() {
 			results[i] = result
 		}
 
-		// 設計書Phase1/3: 重複・無効はスキップ済み。全体は正常(201)としてまとめて返す。
-		return c.JSON(http.StatusCreated, map[string]string{
+		// 設計書Phase1/3: 重複・無効はスキップ済み。全体は正常(201)としてまとめて返すが、
+		// 「同日重複でスキップ」と「エラーで失敗」を呼び出し側が区別できるよう
+		// アイテムごとの結果(results)も併せて返す。
+		return c.JSON(http.StatusCreated, map[string]interface{}{
 			"message": "Batch encounters successfully recorded",
+			"results": results,
 		})
 	}))
 
