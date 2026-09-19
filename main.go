@@ -1797,6 +1797,52 @@ func main() {
 		})
 	}))
 
+	e.PATCH("/users/:id/password", jwtRequired(db, func(c echo.Context) error {
+		userID := c.Param("id")
+		if err := requireSelf(c, userID); err != nil {
+			return err
+		}
+
+		var req struct {
+			CurrentPassword string `json:"current_password"`
+			NewPassword     string `json:"new_password"`
+		}
+		if err := c.Bind(&req); err != nil {
+			return respondError(c, http.StatusBadRequest, "Invalid request body")
+		}
+		if req.CurrentPassword == "" || req.NewPassword == "" {
+			return respondError(c, http.StatusBadRequest, "current_password and new_password are required")
+		}
+		if len(req.NewPassword) < 6 {
+			return respondError(c, http.StatusBadRequest, "new_password must be at least 6 characters")
+		}
+
+		var storedHash string
+		if err := db.QueryRow(`SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&storedHash); err != nil {
+			if err == sql.ErrNoRows {
+				return respondError(c, http.StatusNotFound, "User not found")
+			}
+			log.Printf("Failed to fetch password hash: %v", err)
+			return respondError(c, http.StatusInternalServerError, "Failed to fetch user")
+		}
+
+		if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(req.CurrentPassword)); err != nil {
+			return respondError(c, http.StatusUnauthorized, "current password is incorrect")
+		}
+
+		newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+		if err != nil {
+			return respondError(c, http.StatusInternalServerError, "Failed to hash password")
+		}
+
+		if _, err := db.Exec(`UPDATE users SET password_hash = $1 WHERE id = $2`, string(newHash), userID); err != nil {
+			log.Printf("Failed to update password: %v", err)
+			return respondError(c, http.StatusInternalServerError, "Failed to update password")
+		}
+
+		return c.JSON(http.StatusOK, map[string]string{"message": "Password updated successfully"})
+	}))
+
 	e.DELETE("/users/:id", jwtRequired(db, func(c echo.Context) error {
 		userID := c.Param("id")
 		if err := requireSelf(c, userID); err != nil {
