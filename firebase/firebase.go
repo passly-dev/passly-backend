@@ -1,4 +1,4 @@
-package main
+package firebase
 
 import (
 	"context"
@@ -76,7 +76,7 @@ func UploadUserAvatar(ctx context.Context, userID string, fileReader io.ReadClos
 	filePath := fmt.Sprintf("users/%s/avatar/%s", userID, fileName)
 
 	// 既存のアバターを削除（オプション）
-	_ = cleanupOldAvatars(ctx, userID)
+	_ = CleanupOldAvatars(ctx, userID)
 
 	// アップロード
 	wc := storageClient.Bucket(bucketName).Object(filePath).NewWriter(ctx)
@@ -104,8 +104,8 @@ func UploadUserAvatar(ctx context.Context, userID string, fileReader io.ReadClos
 	return publicURL, nil
 }
 
-// cleanupOldAvatars 古いアバターを削除
-func cleanupOldAvatars(ctx context.Context, userID string) error {
+// CleanupOldAvatars 古いアバターを削除
+func CleanupOldAvatars(ctx context.Context, userID string) error {
 	prefix := fmt.Sprintf("users/%s/avatar/", userID)
 	it := storageClient.Bucket(bucketName).Objects(ctx, &storage.Query{Prefix: prefix})
 
@@ -135,7 +135,7 @@ func UploadUserCover(ctx context.Context, userID string, fileReader io.ReadClose
 	filePath := fmt.Sprintf("users/%s/cover/%s", userID, fileName)
 
 	// 既存のカバー画像を削除（オプション）
-	_ = cleanupOldCovers(ctx, userID)
+	_ = CleanupOldCovers(ctx, userID)
 
 	// アップロード
 	wc := storageClient.Bucket(bucketName).Object(filePath).NewWriter(ctx)
@@ -161,8 +161,8 @@ func UploadUserCover(ctx context.Context, userID string, fileReader io.ReadClose
 	return publicURL, nil
 }
 
-// cleanupOldCovers 古いカバー画像を削除
-func cleanupOldCovers(ctx context.Context, userID string) error {
+// CleanupOldCovers 古いカバー画像を削除
+func CleanupOldCovers(ctx context.Context, userID string) error {
 	prefix := fmt.Sprintf("users/%s/cover/", userID)
 	it := storageClient.Bucket(bucketName).Objects(ctx, &storage.Query{Prefix: prefix})
 
