@@ -56,6 +56,9 @@ func main() {
 			log.Printf("connpass mock seed completed from %s", connpass.MockFilePath())
 		}
 	}
+	if err := database.SeedTechTags(db, "mock/tech_tags.json"); err != nil {
+		log.Printf("tech tags seed skipped: %v", err)
+	}
 	encounterCooldownSeconds := util.GetEncounterCooldownSeconds()
 	log.Printf("encounter cooldown seconds = %d", encounterCooldownSeconds)
 
@@ -81,7 +84,12 @@ func registerRoutes(e *echo.Echo, db *sql.DB, encounterCooldownSeconds int) {
 
 	// --- イベント取得API ---
 	e.GET("/events", connpass.GetEvents(db))
+	e.GET("/events/:id", connpass.GetEventDetail(db))
 	e.GET("/users/:username/events", connpass.GetUserEvents(db))
+	e.GET("/users/:id/connpass-events", connpass.GetUserParticipatedEvents(db))
+
+	// --- 技術タグ(選択式UI用マスタ) ---
+	e.GET("/tech-tags", handler.GetTechTags(db))
 
 	// --- 認証 ---
 	e.POST("/signup", handler.Signup(db))
