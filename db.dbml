@@ -44,3 +44,10 @@ Table encounters {
   is_confirmed boolean [default: false]
   created_at timestamp [default: `now()`]
 }
+// 技術タグのマスタ(選択式UI用)
+Table tech_tags {
+  id serial [primary key]
+  name varchar [unique, not null]
+  category varchar
+  created_at timestamp [default: `now()`]
+}
