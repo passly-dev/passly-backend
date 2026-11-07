@@ -1,2 +1,16 @@
 docs/
 pay-4d153-firebase-adminsdk-fbsvc-481a23e2ab.json
+
+# Secrets (do not commit)
+.env
+.env.*
+!.env.example
+
+# Build outputs
+/app
+/passly_backend
+/streetpass_backend
+
+# Local junk
+.DS_Store
+_to_delete/
