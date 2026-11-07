@@ -19,8 +19,9 @@ import (
 
 const connpassV2EventsURL = "https://connpass.com/api/v2/events/"
 
-// connpass API v2 は 1 秒に 1 リクエストまでなので、同じ問い合わせは短時間キャッシュする。
-const v2CacheTTL = 5 * time.Minute
+// connpass API v2 はプランごとにレート制限がある（フリープランは 12 秒に 1 回・1 日 100 回）。
+// 同じ問い合わせはこの間キャッシュを返し、期限切れ後に取得に失敗したときも前回の結果を返す。
+const v2CacheTTL = 30 * time.Minute
 
 type v2Response struct {
 	Events []v2Event `json:"events"`
@@ -53,6 +54,8 @@ type v2CacheEntry struct {
 var (
 	v2CacheMu sync.Mutex
 	v2Cache   = map[string]v2CacheEntry{}
+	// 一覧で取得済みのイベント。詳細表示のたびに connpass を呼ばないよう ID で引けるようにする。
+	v2EventByID = map[int]v2Event{}
 )
 
 // NormalizeUsername は connpass_username に保存された値（ユーザー名 / @ユーザー名 /
@@ -69,18 +72,46 @@ func NormalizeUsername(raw string) string {
 	return strings.TrimSpace(v)
 }
 
-// fetchV2 は connpass API v2 のイベント検索を呼ぶ。同じクエリは v2CacheTTL の間キャッシュを返す。
+// fetchV2 は connpass API v2 のイベント検索を呼ぶ。同じクエリは v2CacheTTL の間キャッシュを返し、
+// 取得に失敗したとき（レート制限の 429 など）は期限切れでも前回の結果を返す。
 func fetchV2(apiKey string, q url.Values) ([]v2Event, error) {
 	key := q.Encode()
 
 	v2CacheMu.Lock()
-	if cached, ok := v2Cache[key]; ok && time.Since(cached.fetchedAt) < v2CacheTTL {
-		v2CacheMu.Unlock()
+	cached, hasCache := v2Cache[key]
+	v2CacheMu.Unlock()
+	if hasCache && time.Since(cached.fetchedAt) < v2CacheTTL {
 		return cached.events, nil
+	}
+
+	events, err := requestV2(apiKey, key)
+	if err != nil {
+		if hasCache {
+			log.Printf("connpass fetch failed, serving stale cache (query=%s): %v", key, err)
+			return cached.events, nil
+		}
+		return nil, err
+	}
+
+	v2CacheMu.Lock()
+	v2Cache[key] = v2CacheEntry{events: events, fetchedAt: time.Now()}
+	for _, ce := range events {
+		v2EventByID[ce.ID] = ce
 	}
 	v2CacheMu.Unlock()
 
-	req, err := http.NewRequest(http.MethodGet, connpassV2EventsURL+"?"+key, nil)
+	return events, nil
+}
+
+func cachedEventByID(id int) (v2Event, bool) {
+	v2CacheMu.Lock()
+	defer v2CacheMu.Unlock()
+	ce, ok := v2EventByID[id]
+	return ce, ok
+}
+
+func requestV2(apiKey, query string) ([]v2Event, error) {
+	req, err := http.NewRequest(http.MethodGet, connpassV2EventsURL+"?"+query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -101,11 +132,6 @@ func fetchV2(apiKey string, q url.Values) ([]v2Event, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil, err
 	}
-
-	v2CacheMu.Lock()
-	v2Cache[key] = v2CacheEntry{events: payload.Events, fetchedAt: time.Now()}
-	v2CacheMu.Unlock()
-
 	return payload.Events, nil
 }
 
@@ -202,6 +228,13 @@ func GetEventDetail(db *sql.DB) echo.HandlerFunc {
 				}
 			}
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "event not found"})
+		}
+
+		// 参加イベント一覧で取得済みなら connpass を呼ばずに返す
+		if ce, ok := cachedEventByID(eventID); ok {
+			if ev, ok := toEvent(ce); ok {
+				return c.JSON(http.StatusOK, EventDetail{Event: ev, Description: ce.Catch})
+			}
 		}
 
 		apiKey := connpassAPIKey()
