@@ -2,7 +2,10 @@ package database
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"log"
+	"os"
 )
 
 func InitDB(db *sql.DB) {
@@ -104,10 +107,56 @@ func InitDB(db *sql.DB) {
 			CHECK (user_id <> friend_id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_close_friends_user_id ON close_friends(user_id);`,
+		`CREATE TABLE IF NOT EXISTS tech_tags (
+			id SERIAL PRIMARY KEY,
+			name VARCHAR(50) UNIQUE NOT NULL,
+			category VARCHAR(50),
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
 	}
 	for _, q := range queries {
 		if _, err := db.Exec(q); err != nil {
 			log.Fatalf("Table creation error: %v", err)
 		}
 	}
+}
+
+// SeedTechTags は選択式UI用の技術タグマスタをJSONファイルからupsertする。
+// 同名タグは重複せず、再起動しても件数は増えない。
+func SeedTechTags(db *sql.DB, filePath string) error {
+	body, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read tech tags file failed: %w", err)
+	}
+
+	var payload struct {
+		Tags []struct {
+			Name     string `json:"name"`
+			Category string `json:"category"`
+		} `json:"tags"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return fmt.Errorf("parse tech tags file failed: %w", err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx failed: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, t := range payload.Tags {
+		if t.Name == "" {
+			continue
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO tech_tags (name, category) VALUES ($1, $2)
+			 ON CONFLICT (name) DO UPDATE SET category = EXCLUDED.category`,
+			t.Name, t.Category,
+		); err != nil {
+			return fmt.Errorf("upsert tech tag failed (name=%s): %w", t.Name, err)
+		}
+	}
+
+	return tx.Commit()
 }
