@@ -470,10 +470,11 @@ func GetCalendarDaily(db *sql.DB) echo.HandlerFunc {
 		}
 
 		type EncounterUser struct {
-			ID      string `json:"id"`
-			Name    string `json:"name"`
-			IconURL string `json:"icon_url"`
-			OneWord string `json:"one_word"`
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			IconURL   string `json:"icon_url"`
+			OneWord   string `json:"one_word"`
+			TechStack string `json:"tech_stack"`
 		}
 
 		type DailyData struct {
@@ -511,13 +512,14 @@ func GetCalendarDaily(db *sql.DB) echo.HandlerFunc {
 		}
 
 		usersQuery := `
-			SELECT id, name, icon_url, one_word
+			SELECT id, name, icon_url, one_word, tech_stack
 			FROM (
 				SELECT DISTINCT ON (u.id)
 					u.id,
 					u.name,
 					COALESCE(u.icon_url, '') AS icon_url,
 					COALESCE(u.one_word, '') AS one_word,
+					COALESCE(u.tech_stack, '') AS tech_stack,
 					e.created_at
 				FROM encounters e
 				JOIN users u ON u.id = CASE WHEN e.my_id = $1 THEN e.target_id ELSE e.my_id END
@@ -536,7 +538,7 @@ func GetCalendarDaily(db *sql.DB) echo.HandlerFunc {
 
 		for userRows.Next() {
 			var user EncounterUser
-			if err := userRows.Scan(&user.ID, &user.Name, &user.IconURL, &user.OneWord); err != nil {
+			if err := userRows.Scan(&user.ID, &user.Name, &user.IconURL, &user.OneWord, &user.TechStack); err != nil {
 				return util.RespondError(c, http.StatusInternalServerError, "Failed to read encounter users")
 			}
 			res.EncounterUsers = append(res.EncounterUsers, user)
