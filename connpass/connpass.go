@@ -54,6 +54,8 @@ type Event struct {
 	Accepted int       `json:"accepted"`
 	Waiting  int       `json:"waiting"`
 	Limit    int       `json:"limit"`
+	// connpass のイベント画像（API v2 の image_url）。無いイベントは空文字。
+	ImageURL string `json:"image_url"`
 }
 
 func isConnpassMockEnabled() bool {
