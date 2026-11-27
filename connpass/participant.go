@@ -37,6 +37,7 @@ type v2Event struct {
 	Accepted  int    `json:"accepted"`
 	Waiting   int    `json:"waiting"`
 	Place     string `json:"place"`
+	ImageURL  string `json:"image_url"`
 }
 
 // EventDetail は GET /events/:id のレスポンス。アプリの EventModel に合わせる。
@@ -129,6 +130,7 @@ func toEvent(ce v2Event) (Event, bool) {
 		Accepted: ce.Accepted,
 		Waiting:  ce.Waiting,
 		Limit:    ce.Limit,
+		ImageURL: ce.ImageURL,
 	}, true
 }
 
