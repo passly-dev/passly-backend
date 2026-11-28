@@ -224,6 +224,7 @@ func fetchParticipatedEvents(db *sql.DB, nickname string) ([]Event, error) {
 	if err != nil {
 		return nil, err
 	}
+	upsertEvents(db, raw)
 
 	events := make([]Event, 0, len(raw))
 	for _, ce := range raw {
@@ -270,8 +271,13 @@ func GetEventDetail(db *sql.DB) echo.HandlerFunc {
 		raw, err := fetchV2(apiKey, q)
 		if err != nil {
 			log.Printf("connpass event fetch failed (event_id=%d): %v", eventID, err)
+			// レート制限などで取れないときは、前に保存したイベントを返す
+			if detail, ok := loadStoredEvent(db, eventID); ok {
+				return c.JSON(http.StatusOK, detail)
+			}
 			return c.JSON(http.StatusBadGateway, map[string]string{"error": "failed to fetch connpass event"})
 		}
+		upsertEvents(db, raw)
 		for _, ce := range raw {
 			if ev, ok := toEvent(ce); ok && ev.ID == eventID {
 				return c.JSON(http.StatusOK, EventDetail{Event: ev, Description: ce.Catch})
