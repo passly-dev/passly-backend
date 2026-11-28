@@ -122,6 +122,23 @@ func InitDB(db *sql.DB) {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS connpass_synced_at TIMESTAMPTZ;`,
 		// encounters.event_id は自前の events テーブルを参照しているので、connpass のイベントIDは別の列に入れる。
 		`ALTER TABLE encounters ADD COLUMN IF NOT EXISTS connpass_event_id INTEGER;`,
+		// 一度取得した connpass のイベントと、イベントページの og:image のURL(2026-11-28)。
+		// 画像そのものは保存しない。
+		`CREATE TABLE IF NOT EXISTS connpass_events (
+			event_id INTEGER PRIMARY KEY,
+			title TEXT NOT NULL DEFAULT '',
+			catch TEXT,
+			event_url TEXT,
+			place TEXT,
+			started_at TIMESTAMPTZ NOT NULL,
+			ended_at TIMESTAMPTZ NOT NULL,
+			limit_count INTEGER,
+			accepted INTEGER,
+			waiting INTEGER,
+			image_url TEXT,
+			image_checked_at TIMESTAMPTZ,
+			updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+		);`,
 		`CREATE TABLE IF NOT EXISTS tech_tags (
 			id SERIAL PRIMARY KEY,
 			name VARCHAR(50) UNIQUE NOT NULL,

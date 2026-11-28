@@ -195,6 +195,7 @@ func GetUserParticipatedEvents(db *sql.DB) echo.HandlerFunc {
 		if err := saveUserEvents(db, c.Param("id"), events); err != nil {
 			log.Printf("save connpass events failed (user_id=%s): %v", c.Param("id"), err)
 		}
+		attachImages(db, events)
 		return c.JSON(http.StatusOK, events)
 	}
 }
@@ -222,6 +223,7 @@ func fetchParticipatedEvents(db *sql.DB, nickname string) ([]Event, error) {
 	if err != nil {
 		return nil, err
 	}
+	upsertEvents(db, raw)
 
 	events := make([]Event, 0, len(raw))
 	for _, ce := range raw {
@@ -253,7 +255,9 @@ func GetEventDetail(db *sql.DB) echo.HandlerFunc {
 		// 参加イベント一覧で取得済みなら connpass を呼ばずに返す
 		if ce, ok := cachedEventByID(eventID); ok {
 			if ev, ok := toEvent(ce); ok {
-				return c.JSON(http.StatusOK, EventDetail{Event: ev, Description: ce.Catch})
+				detail := EventDetail{Event: ev, Description: ce.Catch}
+				attachImageNow(db, &detail.Event)
+				return c.JSON(http.StatusOK, detail)
 			}
 		}
 
@@ -268,11 +272,18 @@ func GetEventDetail(db *sql.DB) echo.HandlerFunc {
 		raw, err := fetchV2(apiKey, q)
 		if err != nil {
 			log.Printf("connpass event fetch failed (event_id=%d): %v", eventID, err)
+			// レート制限などで取れないときは、前に保存したイベントを返す
+			if detail, ok := loadStoredEvent(db, eventID); ok {
+				return c.JSON(http.StatusOK, detail)
+			}
 			return c.JSON(http.StatusBadGateway, map[string]string{"error": "failed to fetch connpass event"})
 		}
+		upsertEvents(db, raw)
 		for _, ce := range raw {
 			if ev, ok := toEvent(ce); ok && ev.ID == eventID {
-				return c.JSON(http.StatusOK, EventDetail{Event: ev, Description: ce.Catch})
+				detail := EventDetail{Event: ev, Description: ce.Catch}
+				attachImageNow(db, &detail.Event)
+				return c.JSON(http.StatusOK, detail)
 			}
 		}
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "event not found"})
