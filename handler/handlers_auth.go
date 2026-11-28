@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"passly_backend/auth"
+	"passly_backend/connpass"
 	"passly_backend/model"
 	"passly_backend/util"
 )
@@ -82,6 +83,9 @@ func Login(db *sql.DB) echo.HandlerFunc {
 			log.Printf("jwt generate error user_id=%s err=%v", userID, err)
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to issue token"})
 		}
+
+		// すれ違いの判定に使う connpass 参加イベントを先に保存しておく
+		connpass.SyncUserEventsInBackground(db, userID)
 
 		return c.JSON(http.StatusOK, map[string]string{
 			"message": "Login successful",

@@ -182,34 +182,54 @@ func GetUserParticipatedEvents(db *sql.DB) echo.HandlerFunc {
 			return c.JSON(http.StatusOK, []Event{})
 		}
 
-		if isConnpassMockEnabled() {
-			return c.JSON(http.StatusOK, buildMockEvents(db, nickname))
-		}
-
-		apiKey := connpassAPIKey()
-		if apiKey == "" {
+		events, err := fetchParticipatedEvents(db, nickname)
+		if errors.Is(err, errNoAPIKey) {
 			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "CONNPASS_API_KEY is not set"})
 		}
-
-		q := url.Values{}
-		q.Set("nickname", nickname)
-		q.Set("order", "3") // 開催日時の新しい順
-		q.Set("count", "100")
-
-		raw, err := fetchV2(apiKey, q)
 		if err != nil {
 			log.Printf("connpass participant fetch failed (user=%s): %v", nickname, err)
 			return c.JSON(http.StatusBadGateway, map[string]string{"error": "failed to fetch connpass events"})
 		}
 
-		events := make([]Event, 0, len(raw))
-		for _, ce := range raw {
-			if ev, ok := toEvent(ce); ok {
-				events = append(events, ev)
-			}
+		// 取得できたついでに保存しておく（すれ違いの判定で使う）
+		if err := saveUserEvents(db, c.Param("id"), events); err != nil {
+			log.Printf("save connpass events failed (user_id=%s): %v", c.Param("id"), err)
 		}
 		return c.JSON(http.StatusOK, events)
 	}
+}
+
+var errNoAPIKey = errors.New("CONNPASS_API_KEY is not set")
+
+// fetchParticipatedEvents は connpass のニックネームで、参加した・参加予定のイベントを取得する。
+// モックモード時はモックを返す。
+func fetchParticipatedEvents(db *sql.DB, nickname string) ([]Event, error) {
+	if isConnpassMockEnabled() {
+		return buildMockEvents(db, nickname), nil
+	}
+
+	apiKey := connpassAPIKey()
+	if apiKey == "" {
+		return nil, errNoAPIKey
+	}
+
+	q := url.Values{}
+	q.Set("nickname", nickname)
+	q.Set("order", "3") // 開催日時の新しい順
+	q.Set("count", "100")
+
+	raw, err := fetchV2(apiKey, q)
+	if err != nil {
+		return nil, err
+	}
+
+	events := make([]Event, 0, len(raw))
+	for _, ce := range raw {
+		if ev, ok := toEvent(ce); ok {
+			events = append(events, ev)
+		}
+	}
+	return events, nil
 }
 
 // GetEventDetail は connpass のイベントIDで 1 件取得する。

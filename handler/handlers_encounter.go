@@ -11,6 +11,7 @@ import (
 	"github.com/lib/pq"
 
 	"passly_backend/auth"
+	"passly_backend/connpass"
 	"passly_backend/model"
 	"passly_backend/util"
 )
@@ -216,8 +217,25 @@ func CreateEncounter(db *sql.DB, encounterCooldownSeconds int) echo.HandlerFunc 
 			})
 		}
 
-		query := `INSERT INTO encounters (my_id, target_id, event_id) VALUES ($1, $2, $3) RETURNING id`
-		err = db.QueryRow(query, enc.MyID, enc.TargetID, enc.EventID).Scan(&enc.ID)
+		// 2人とも参加している connpass イベントの開催時間内（開始30分前〜終了30分後）だけ記録する
+		var connpassEventID *int
+		if util.IsEncounterEventWindowRequired() {
+			eventID, ok, ferr := connpass.FindSharedEventAt(db, enc.MyID, enc.TargetID, time.Now())
+			if ferr != nil {
+				log.Printf("encounter event-check error my_id=%s target_id=%s err=%v", enc.MyID, enc.TargetID, ferr)
+				return util.RespondError(c, http.StatusInternalServerError, "Database error during event check")
+			}
+			if !ok {
+				log.Printf("encounter skipped no-shared-event my_id=%s target_id=%s", enc.MyID, enc.TargetID)
+				return c.JSON(http.StatusOK, map[string]string{
+					"message": "Encounter skipped because this pair is not at the same event",
+				})
+			}
+			connpassEventID = &eventID
+		}
+
+		query := `INSERT INTO encounters (my_id, target_id, event_id, connpass_event_id) VALUES ($1, $2, $3, $4) RETURNING id`
+		err = db.QueryRow(query, enc.MyID, enc.TargetID, enc.EventID, connpassEventID).Scan(&enc.ID)
 		if err != nil {
 			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
 				log.Printf("encounter skipped by unique index my_id=%s target_id=%s", enc.MyID, enc.TargetID)
@@ -266,7 +284,7 @@ func CreateEncountersBatch(db *sql.DB) echo.HandlerFunc {
 
 		type BatchResultItem struct {
 			Index    int    `json:"index"`
-			Status   string `json:"status"` // created | skipped_duplicate | skipped_self | invalid_token | error
+			Status   string `json:"status"` // created | skipped_duplicate | skipped_self | skipped_no_event | invalid_token | error
 			Message  string `json:"message,omitempty"`
 			TargetID string `json:"target_id,omitempty"`
 			ID       *int   `json:"id,omitempty"`
@@ -351,9 +369,29 @@ func CreateEncountersBatch(db *sql.DB) echo.HandlerFunc {
 				continue
 			}
 
+			// 送信時刻ではなく、すれ違った時刻(encounteredAt)でイベントの開催時間内かを判定する
+			var connpassEventID *int
+			if util.IsEncounterEventWindowRequired() {
+				eventID, ok, ferr := connpass.FindSharedEventAt(db, myID, targetID, encounteredAt)
+				if ferr != nil {
+					log.Printf("batch encounter event-check error my_id=%s target_id=%s err=%v", myID, targetID, ferr)
+					result.Status = "error"
+					result.Message = "database error during event check"
+					results[i] = result
+					continue
+				}
+				if !ok {
+					result.Status = "skipped_no_event"
+					result.Message = "not at the same event at encountered_at"
+					results[i] = result
+					continue
+				}
+				connpassEventID = &eventID
+			}
+
 			var newID int
-			insertQuery := `INSERT INTO encounters (my_id, target_id, event_id, created_at) VALUES ($1, $2, $3, $4) RETURNING id`
-			if err := db.QueryRow(insertQuery, myID, targetID, item.EventID, encounteredAt).Scan(&newID); err != nil {
+			insertQuery := `INSERT INTO encounters (my_id, target_id, event_id, connpass_event_id, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING id`
+			if err := db.QueryRow(insertQuery, myID, targetID, item.EventID, connpassEventID, encounteredAt).Scan(&newID); err != nil {
 				if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
 					result.Status = "skipped_duplicate"
 					results[i] = result
