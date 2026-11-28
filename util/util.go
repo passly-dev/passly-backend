@@ -31,6 +31,13 @@ func GenerateEphemeralToken() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+// IsEncounterEventWindowRequired は、すれ違いを connpass イベントの開催時間内に限定するかを返す。
+// 既定は true。ローカル検証などで外したいときだけ ENCOUNTER_REQUIRE_EVENT=false にする。
+func IsEncounterEventWindowRequired() bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv("ENCOUNTER_REQUIRE_EVENT")))
+	return !(raw == "0" || raw == "false" || raw == "no" || raw == "off")
+}
+
 func GetEncounterCooldownSeconds() int {
 	// ハッカソン検証中は短めにして、実機テストで件数変化を確認しやすくする
 	const defaultSeconds = 10

@@ -15,6 +15,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"passly_backend/auth"
+	"passly_backend/connpass"
 	"passly_backend/firebase"
 	"passly_backend/model"
 	"passly_backend/util"
@@ -104,6 +105,10 @@ func UpdateUser(db *sql.DB) echo.HandlerFunc {
 		}
 
 		updateFields = append(updateFields, "updated_at = CURRENT_TIMESTAMP")
+		// connpass のユーザー名が変わったら、次のすれ違い判定で参加イベントを取り直す
+		if _, ok := updateData["connpass_username"].(string); ok {
+			updateFields = append(updateFields, "connpass_synced_at = NULL")
+		}
 
 		updateQuery := fmt.Sprintf(
 			"UPDATE users SET %s WHERE id = $%d",
@@ -116,6 +121,11 @@ func UpdateUser(db *sql.DB) echo.HandlerFunc {
 		if err != nil {
 			log.Printf("Failed to update user: %v", err)
 			return util.RespondError(c, http.StatusInternalServerError, "failed to update user profile")
+		}
+
+		// connpass のユーザー名が変わったら、新しいユーザー名で参加イベントを取り直しておく
+		if _, ok := updateData["connpass_username"].(string); ok {
+			connpass.SyncUserEventsInBackground(db, userID)
 		}
 
 		return c.JSON(http.StatusOK, map[string]string{

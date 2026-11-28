@@ -107,6 +107,21 @@ func InitDB(db *sql.DB) {
 			CHECK (user_id <> friend_id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_close_friends_user_id ON close_friends(user_id);`,
+		// すれ違いをイベント開催時間内に限定する(2026-11-28)。
+		// 各ユーザーの connpass 参加イベントを保存し、すれ違いのたびに connpass を呼ばずに判定する。
+		`CREATE TABLE IF NOT EXISTS user_connpass_events (
+			user_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			event_id INTEGER NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			started_at TIMESTAMPTZ NOT NULL,
+			ended_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (user_id, event_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_connpass_events_event_id ON user_connpass_events(event_id);`,
+		// 参加イベントを最後に connpass から取り直した時刻。NULL なら未取得。
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS connpass_synced_at TIMESTAMPTZ;`,
+		// encounters.event_id は自前の events テーブルを参照しているので、connpass のイベントIDは別の列に入れる。
+		`ALTER TABLE encounters ADD COLUMN IF NOT EXISTS connpass_event_id INTEGER;`,
 		`CREATE TABLE IF NOT EXISTS tech_tags (
 			id SERIAL PRIMARY KEY,
 			name VARCHAR(50) UNIQUE NOT NULL,

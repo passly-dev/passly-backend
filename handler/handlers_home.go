@@ -8,6 +8,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
+	"passly_backend/connpass"
 	"passly_backend/util"
 )
 
@@ -35,6 +36,11 @@ func GetPlazaCount(db *sql.DB) echo.HandlerFunc {
 func GetHome(db *sql.DB) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		userID := c.Param("id")
+
+		// アプリを開くたびに呼ばれるので、ここで connpass 参加イベントを保存しておく。
+		// ログインは JWT が切れたとき（72時間）しか起きないため、ログイン時だけでは足りない。
+		// 3時間以内に取得済みなら connpass は呼ばない。
+		connpass.SyncUserEventsInBackground(db, userID)
 
 		type RecentEncounterJSON struct {
 			UserID    string    `json:"user_id"`
