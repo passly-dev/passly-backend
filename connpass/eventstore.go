@@ -4,10 +4,14 @@ import (
 	"database/sql"
 	"errors"
 	"log"
+	"time"
 )
 
 // 一度取得した connpass のイベントを connpass_events テーブルに保存する。
-// イベント詳細の取得で connpass が失敗したとき（レート制限など）に、保存済みのものを返すために使う。
+// イベント詳細やイベント一覧を、connpass を呼ばずに返すために使う。
+
+// 保存したイベントを、connpass から取り直さずにそのまま返す期間
+const storedEventTTL = 3 * time.Hour
 
 // upsertEvents は connpass API で取得したイベントを保存する。すでにあれば上書きする。
 func upsertEvents(db *sql.DB, raw []v2Event) {
@@ -42,23 +46,27 @@ func upsertEvents(db *sql.DB, raw []v2Event) {
 	}
 }
 
-// loadStoredEvent は保存済みのイベントを1件返す。connpass が使えないときの予備。
-func loadStoredEvent(db *sql.DB, eventID int) (EventDetail, bool) {
+// loadStoredEvent は保存済みのイベントを1件返す。
+// fresh は storedEventTTL 以内に connpass から取得したものかどうか。
+func loadStoredEvent(db *sql.DB, eventID int) (detail EventDetail, fresh bool, ok bool) {
 	var d EventDetail
 	var catch, eventURL, imageURL, place sql.NullString
 	var limit, accepted, waiting sql.NullInt64
+	var updatedAt sql.NullTime
 	err := db.QueryRow(`
 		SELECT event_id, title, catch, event_url, image_url, place, started_at, ended_at,
-		       limit_count, accepted, waiting
+		       limit_count, accepted, waiting, updated_at
 		FROM connpass_events WHERE event_id = $1
 	`, eventID).Scan(&d.ID, &d.Name, &catch, &eventURL, &imageURL, &place, &d.StartAt, &d.EndAt,
-		&limit, &accepted, &waiting)
+		&limit, &accepted, &waiting, &updatedAt)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			log.Printf("load stored connpass event failed (event_id=%d): %v", eventID, err)
 		}
-		return EventDetail{}, false
+		return EventDetail{}, false, false
 	}
+	d.StartAt = d.StartAt.UTC()
+	d.EndAt = d.EndAt.UTC()
 	d.Description = catch.String
 	d.EventURL = eventURL.String
 	d.ImageURL = imageURL.String
@@ -67,5 +75,39 @@ func loadStoredEvent(db *sql.DB, eventID int) (EventDetail, bool) {
 	d.Accepted = int(accepted.Int64)
 	d.Count = d.Accepted
 	d.Waiting = int(waiting.Int64)
-	return d, true
+	fresh = updatedAt.Valid && time.Since(updatedAt.Time) < storedEventTTL
+	return d, fresh, true
+}
+
+// 一覧 GET /events で返す範囲。カレンダーで過去の月も表示するので、過去分も少し含める。
+const listedEventsPastRange = 180 * 24 * time.Hour
+
+// loadListedEvents は保存済みのイベント（Passly のユーザーが参加したもの）を、開催日時の古い順に返す。
+func loadListedEvents(db *sql.DB) ([]Event, error) {
+	rows, err := db.Query(`
+		SELECT event_id, title, COALESCE(place, ''), COALESCE(event_url, ''), COALESCE(image_url, ''),
+		       started_at, ended_at, COALESCE(accepted, 0), COALESCE(waiting, 0), COALESCE(limit_count, 0)
+		FROM connpass_events
+		WHERE ended_at >= $1
+		ORDER BY started_at ASC
+		LIMIT 200
+	`, time.Now().Add(-listedEventsPastRange))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	events := make([]Event, 0)
+	for rows.Next() {
+		var ev Event
+		if err := rows.Scan(&ev.ID, &ev.Name, &ev.Location, &ev.EventURL, &ev.ImageURL,
+			&ev.StartAt, &ev.EndAt, &ev.Accepted, &ev.Waiting, &ev.Limit); err != nil {
+			return nil, err
+		}
+		ev.StartAt = ev.StartAt.UTC()
+		ev.EndAt = ev.EndAt.UTC()
+		ev.Count = ev.Accepted
+		events = append(events, ev)
+	}
+	return events, rows.Err()
 }

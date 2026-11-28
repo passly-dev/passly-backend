@@ -382,59 +382,25 @@ func buildMockEvents(db *sql.DB, owner string) []Event {
 	}
 }
 
-func fetchConnpassEvents(url string) ([]Event, error) {
-	client := &http.Client{Timeout: 8 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("connpass status: %d", resp.StatusCode)
-	}
-
-	var connpassData ConnpassResponse
-	if err := json.NewDecoder(resp.Body).Decode(&connpassData); err != nil {
-		return nil, err
-	}
-
-	return convertConnpassEvents(connpassData.Events, "")
-}
-
+// GetEvents は GET /events。広場画面とカレンダーで使うイベント一覧。
+//
+// connpass は呼ばず、保存済みのイベント（Passly のユーザーが参加したもの）を返す。
+// 以前は connpass API v1 を呼んでいたが、v1 は2025年末に終了していて毎回失敗していた。
+// 保存済みのイベントがまだないとき（使い始めなど）と、モックモードのときはモックを返す。
 func GetEvents(db *sql.DB) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		// connpass API申請待ち/障害時でも開発を止めないため、モック返却を可能にする。
 		if isConnpassMockEnabled() {
 			return c.JSON(http.StatusOK, buildMockEvents(db, ""))
 		}
 
-		url := "https://connpass.com/api/v1/event/?keyword=Go&count=5"
-		events, err := fetchConnpassEvents(url)
+		events, err := loadListedEvents(db)
 		if err != nil {
-			log.Printf("connpass fetch failed, fallback to mock events: %v", err)
+			log.Printf("load listed connpass events failed, fallback to mock events: %v", err)
 			return c.JSON(http.StatusOK, buildMockEvents(db, ""))
 		}
-
-		return c.JSON(http.StatusOK, events)
-	}
-}
-
-func GetUserEvents(db *sql.DB) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		username := c.Param("username")
-		// owner別APIも同様に、外部依存失敗時はユーザー名付きモックへフォールバックする。
-		if isConnpassMockEnabled() {
-			return c.JSON(http.StatusOK, buildMockEvents(db, username))
+		if len(events) == 0 {
+			return c.JSON(http.StatusOK, buildMockEvents(db, ""))
 		}
-
-		url := "https://connpass.com/api/v1/event/?owner_account=" + username
-		events, err := fetchConnpassEvents(url)
-		if err != nil {
-			log.Printf("connpass user fetch failed (user=%s), fallback to mock events: %v", username, err)
-			return c.JSON(http.StatusOK, buildMockEvents(db, username))
-		}
-
 		return c.JSON(http.StatusOK, events)
 	}
 }

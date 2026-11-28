@@ -85,7 +85,6 @@ func registerRoutes(e *echo.Echo, db *sql.DB, encounterCooldownSeconds int) {
 	// --- イベント取得API ---
 	e.GET("/events", connpass.GetEvents(db))
 	e.GET("/events/:id", connpass.GetEventDetail(db))
-	e.GET("/users/:username/events", connpass.GetUserEvents(db))
 	e.GET("/users/:id/connpass-events", connpass.GetUserParticipatedEvents(db))
 
 	// --- 技術タグ(選択式UI用マスタ) ---

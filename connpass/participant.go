@@ -111,7 +111,29 @@ func cachedEventByID(id int) (v2Event, bool) {
 	return ce, ok
 }
 
+// connpass API v2 を今日（日本時間）何回呼んだか。フリープランは1日100回まで。
+// サーバーのメモリにあるので、再起動やスリープで0に戻る（実際の回数はこれ以上のことがある）。
+var (
+	callCountMu  sync.Mutex
+	callCountDay string
+	callCount    int
+)
+
+func countV2Call(query string) {
+	today := time.Now().In(jst).Format("2006-01-02")
+	callCountMu.Lock()
+	if callCountDay != today {
+		callCountDay = today
+		callCount = 0
+	}
+	callCount++
+	n := callCount
+	callCountMu.Unlock()
+	log.Printf("connpass api v2 call #%d today (%s JST) query=%s", n, today, query)
+}
+
 func requestV2(apiKey, query string) ([]v2Event, error) {
+	countV2Call(query)
 	req, err := http.NewRequest(http.MethodGet, connpassV2EventsURL+"?"+query, nil)
 	if err != nil {
 		return nil, err
@@ -183,22 +205,75 @@ func GetUserParticipatedEvents(db *sql.DB) echo.HandlerFunc {
 		if nickname == "" {
 			return c.JSON(http.StatusOK, []Event{})
 		}
+		userID := c.Param("id")
+
+		// userEventsTTL 以内に取得済みなら、connpass を呼ばずに保存したものを返す。
+		// （モックモードはモックの変更をすぐ見られるよう、毎回モックを作る）
+		if !isConnpassMockEnabled() {
+			if events, fresh, err := loadUserEvents(db, userID); err != nil {
+				log.Printf("load stored connpass events failed (user_id=%s): %v", userID, err)
+			} else if fresh {
+				return c.JSON(http.StatusOK, events)
+			}
+		}
 
 		events, err := fetchParticipatedEvents(db, nickname)
-		if errors.Is(err, errNoAPIKey) {
-			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "CONNPASS_API_KEY is not set"})
-		}
 		if err != nil {
 			log.Printf("connpass participant fetch failed (user=%s): %v", nickname, err)
+			// 取れなかったときは、古くても保存したものを返す
+			if stored, _, lerr := loadUserEvents(db, userID); lerr == nil && len(stored) > 0 {
+				return c.JSON(http.StatusOK, stored)
+			}
+			if errors.Is(err, errNoAPIKey) {
+				return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "CONNPASS_API_KEY is not set"})
+			}
 			return c.JSON(http.StatusBadGateway, map[string]string{"error": "failed to fetch connpass events"})
 		}
 
-		// 取得できたついでに保存しておく（すれ違いの判定で使う）
-		if err := saveUserEvents(db, c.Param("id"), events); err != nil {
-			log.Printf("save connpass events failed (user_id=%s): %v", c.Param("id"), err)
+		// 取得できたら保存しておく（次の表示と、すれ違いの判定で使う）
+		if err := saveUserEvents(db, userID, events); err != nil {
+			log.Printf("save connpass events failed (user_id=%s): %v", userID, err)
 		}
 		return c.JSON(http.StatusOK, events)
 	}
+}
+
+// loadUserEvents はユーザーの保存済みの参加イベントを、開催日時の新しい順に返す。
+// fresh は userEventsTTL 以内に connpass から取得したものかどうか。
+func loadUserEvents(db *sql.DB, userID string) (events []Event, fresh bool, err error) {
+	var syncedAt sql.NullTime
+	if err := db.QueryRow(`SELECT connpass_synced_at FROM users WHERE id = $1`, userID).Scan(&syncedAt); err != nil {
+		return nil, false, err
+	}
+	fresh = syncedAt.Valid && time.Since(syncedAt.Time) < userEventsTTL
+
+	rows, err := db.Query(`
+		SELECT u.event_id, u.title, u.started_at, u.ended_at,
+		       COALESCE(c.place, ''), COALESCE(c.event_url, ''), COALESCE(c.image_url, ''),
+		       COALESCE(c.accepted, 0), COALESCE(c.waiting, 0), COALESCE(c.limit_count, 0)
+		FROM user_connpass_events u
+		LEFT JOIN connpass_events c ON c.event_id = u.event_id
+		WHERE u.user_id = $1
+		ORDER BY u.started_at DESC
+	`, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	events = make([]Event, 0)
+	for rows.Next() {
+		var ev Event
+		if err := rows.Scan(&ev.ID, &ev.Name, &ev.StartAt, &ev.EndAt,
+			&ev.Location, &ev.EventURL, &ev.ImageURL, &ev.Accepted, &ev.Waiting, &ev.Limit); err != nil {
+			return nil, false, err
+		}
+		ev.StartAt = ev.StartAt.UTC()
+		ev.EndAt = ev.EndAt.UTC()
+		ev.Count = ev.Accepted
+		events = append(events, ev)
+	}
+	return events, fresh, rows.Err()
 }
 
 var errNoAPIKey = errors.New("CONNPASS_API_KEY is not set")
@@ -260,8 +335,17 @@ func GetEventDetail(db *sql.DB) echo.HandlerFunc {
 			}
 		}
 
+		// storedEventTTL 以内に保存したものがあれば、connpass を呼ばずに返す
+		stored, fresh, hasStored := loadStoredEvent(db, eventID)
+		if hasStored && fresh {
+			return c.JSON(http.StatusOK, stored)
+		}
+
 		apiKey := connpassAPIKey()
 		if apiKey == "" {
+			if hasStored {
+				return c.JSON(http.StatusOK, stored)
+			}
 			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "CONNPASS_API_KEY is not set"})
 		}
 
@@ -271,9 +355,9 @@ func GetEventDetail(db *sql.DB) echo.HandlerFunc {
 		raw, err := fetchV2(apiKey, q)
 		if err != nil {
 			log.Printf("connpass event fetch failed (event_id=%d): %v", eventID, err)
-			// レート制限などで取れないときは、前に保存したイベントを返す
-			if detail, ok := loadStoredEvent(db, eventID); ok {
-				return c.JSON(http.StatusOK, detail)
+			// レート制限などで取れないときは、古くても保存したイベントを返す
+			if hasStored {
+				return c.JSON(http.StatusOK, stored)
 			}
 			return c.JSON(http.StatusBadGateway, map[string]string{"error": "failed to fetch connpass event"})
 		}
