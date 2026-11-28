@@ -49,6 +49,7 @@ func main() {
 	}
 
 	database.InitDB(db)
+	database.StartEphemeralTokenCleanup(db)
 	if connpass.ShouldSeedMockOnStartup() {
 		if err := connpass.SeedMockEventsFromFile(db, connpass.MockFilePath()); err != nil {
 			log.Printf("connpass mock seed skipped: %v", err)

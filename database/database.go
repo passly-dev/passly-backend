@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 )
 
 func InitDB(db *sql.DB) {
@@ -150,6 +151,46 @@ func InitDB(db *sql.DB) {
 			log.Fatalf("Table creation error: %v", err)
 		}
 	}
+}
+
+// 期限が切れてからこれ以上たった一時トークンは消す。
+//
+// オフラインで貯めたすれ違いは、すれ違った時刻を基準にトークンを照合する（ResolveUserIDFromTokenAt）。
+// アプリはすれ違ってから48時間まで未送信のトークンを持っているので、それより十分長く残す。
+// これより短くすると、48時間以内の一括送信でも invalid_token になる。
+const ephemeralTokenRetention = 7 * 24 * time.Hour
+
+// CleanupExpiredEphemeralTokens は、期限が切れてから ephemeralTokenRetention 以上たった一時トークンを消す。
+func CleanupExpiredEphemeralTokens(db *sql.DB) (int64, error) {
+	res, err := db.Exec(
+		`DELETE FROM ephemeral_tokens WHERE expires_at < $1`,
+		time.Now().UTC().Add(-ephemeralTokenRetention),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired ephemeral tokens failed: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// StartEphemeralTokenCleanup は、起動時と、その後1日ごとに古い一時トークンを消す。
+// Render の無料プランはスリープと起動を繰り返すので、起動時の分だけでもほぼ足りる。
+func StartEphemeralTokenCleanup(db *sql.DB) {
+	run := func() {
+		n, err := CleanupExpiredEphemeralTokens(db)
+		if err != nil {
+			log.Printf("ephemeral token cleanup failed: %v", err)
+			return
+		}
+		log.Printf("ephemeral token cleanup removed %d tokens", n)
+	}
+	go func() {
+		run()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			run()
+		}
+	}()
 }
 
 // SeedTechTags は選択式UI用の技術タグマスタをJSONファイルからupsertする。
