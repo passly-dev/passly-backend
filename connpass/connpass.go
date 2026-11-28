@@ -54,7 +54,7 @@ type Event struct {
 	Accepted int       `json:"accepted"`
 	Waiting  int       `json:"waiting"`
 	Limit    int       `json:"limit"`
-	// イベントページの og:image。まだ読んでいない・画像がないときは空文字。
+	// connpass のイベント画像（API v2 の image_url）。無いイベントは空文字。
 	ImageURL string `json:"image_url"`
 }
 

@@ -38,6 +38,7 @@ type v2Event struct {
 	Accepted  int    `json:"accepted"`
 	Waiting   int    `json:"waiting"`
 	Place     string `json:"place"`
+	ImageURL  string `json:"image_url"`
 }
 
 // EventDetail は GET /events/:id のレスポンス。アプリの EventModel に合わせる。
@@ -155,6 +156,7 @@ func toEvent(ce v2Event) (Event, bool) {
 		Accepted: ce.Accepted,
 		Waiting:  ce.Waiting,
 		Limit:    ce.Limit,
+		ImageURL: ce.ImageURL,
 	}, true
 }
 
@@ -195,7 +197,6 @@ func GetUserParticipatedEvents(db *sql.DB) echo.HandlerFunc {
 		if err := saveUserEvents(db, c.Param("id"), events); err != nil {
 			log.Printf("save connpass events failed (user_id=%s): %v", c.Param("id"), err)
 		}
-		attachImages(db, events)
 		return c.JSON(http.StatusOK, events)
 	}
 }
@@ -255,9 +256,7 @@ func GetEventDetail(db *sql.DB) echo.HandlerFunc {
 		// 参加イベント一覧で取得済みなら connpass を呼ばずに返す
 		if ce, ok := cachedEventByID(eventID); ok {
 			if ev, ok := toEvent(ce); ok {
-				detail := EventDetail{Event: ev, Description: ce.Catch}
-				attachImageNow(db, &detail.Event)
-				return c.JSON(http.StatusOK, detail)
+				return c.JSON(http.StatusOK, EventDetail{Event: ev, Description: ce.Catch})
 			}
 		}
 
@@ -281,9 +280,7 @@ func GetEventDetail(db *sql.DB) echo.HandlerFunc {
 		upsertEvents(db, raw)
 		for _, ce := range raw {
 			if ev, ok := toEvent(ce); ok && ev.ID == eventID {
-				detail := EventDetail{Event: ev, Description: ce.Catch}
-				attachImageNow(db, &detail.Event)
-				return c.JSON(http.StatusOK, detail)
+				return c.JSON(http.StatusOK, EventDetail{Event: ev, Description: ce.Catch})
 			}
 		}
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "event not found"})
